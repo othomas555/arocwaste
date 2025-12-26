@@ -1,15 +1,15 @@
 import Head from "next/head";
-import { furnitureItems as items, furnitureSteps as steps } from "../data/furniture";
 import Layout from "../components/layout";
+import { applianceItems } from "../data/appliances";
 
-export default function FurniturePage() {
+export default function AppliancesPage() {
   return (
     <>
       <Head>
-        <title>Furniture Removal & Bulky Waste Collection | AROC Waste</title>
+        <title>Appliance Collection (Fridges, Freezers, Washing Machines) | AROC Waste</title>
         <meta
           name="description"
-          content="Book furniture and bulky waste removal in South Wales. Upload photos, get a fixed quote, and choose a collection slot. Licensed waste carrier. Card payment."
+          content="Book appliance and WEEE collection in South Wales. Choose your item, see the price, and get started. Licensed waste carrier. Card payment."
         />
       </Head>
 
@@ -20,33 +20,33 @@ export default function FurniturePage() {
             <div className="mx-auto max-w-6xl">
               <div className="max-w-2xl">
                 <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight">
-                  Furniture & bulky waste removal
+                  Appliance collection
                 </h1>
                 <p className="mt-4 text-base sm:text-lg text-gray-600">
-                  Simple, fixed-price collections for your home. Upload a photo, get a quote, book a slot.
+                  Fixed-price collections for common appliances. Choose an item below to get started.
                 </p>
 
                 <div className="mt-6 flex flex-col sm:flex-row gap-3">
                   <a
-                    href="/quote?service=furniture"
+                    href="#appliance-list"
                     className="inline-flex items-center justify-center rounded-2xl px-5 py-3 text-base font-semibold bg-gray-900 text-white shadow-sm"
                   >
-                    Get a quote
+                    See prices
                   </a>
                   <a
-                    href="#what-we-collect"
+                    href="/quote?service=appliances"
                     className="inline-flex items-center justify-center rounded-2xl px-5 py-3 text-base font-semibold border border-gray-200 text-gray-900"
                   >
-                    See what we collect
+                    Get a quote
                   </a>
                 </div>
 
                 <div className="mt-8 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
                   {[
-                    "Licensed waste carrier",
+                    "WEEE handled correctly",
                     "Card payment only",
                     "Local South Wales",
-                    "Reliable time slots",
+                    "Photos help accuracy",
                   ].map((t) => (
                     <div
                       key={t}
@@ -60,103 +60,79 @@ export default function FurniturePage() {
             </div>
           </section>
 
-          {/* GRID */}
-          <section id="what-we-collect" className="px-4 py-12 bg-gray-50">
+          {/* LIST */}
+          <section id="appliance-list" className="px-4 py-12 bg-gray-50">
             <div className="mx-auto max-w-6xl">
               <div className="flex items-end justify-between gap-6">
                 <div>
                   <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
-                    What we collect
+                    Prices (per item)
                   </h2>
                   <p className="mt-2 text-gray-600">
-                    Choose the closest match — photos help us price it accurately.
+                    Base prices assume easy access (ground floor/driveway/kerbside). If it’s awkward access or stairs,
+                    we’ll confirm from photos.
                   </p>
                 </div>
               </div>
 
               <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {items.map((it) => (
+                {applianceItems.map((it) => (
                   <div
-                    key={it.title}
-                    className="rounded-2xl bg-white border border-gray-100 p-5 shadow-sm"
+                    key={it.id}
+                    className="rounded-2xl bg-white border border-gray-100 p-5 shadow-sm flex flex-col"
                   >
                     <div className="h-10 w-10 rounded-2xl bg-gray-100 mb-4" />
+
                     <h3 className="text-lg font-semibold">{it.title}</h3>
                     <p className="mt-2 text-sm text-gray-600">{it.desc}</p>
-                    <div className="mt-4">
+
+                    <div className="mt-4 flex items-baseline justify-between">
+                      <div className="text-lg font-semibold">£{it.price}</div>
+                      {it.photoRequired ? (
+                        <span className="text-xs rounded-full bg-gray-100 px-2 py-1 text-gray-700">
+                          Photo required
+                        </span>
+                      ) : (
+                        <span className="text-xs rounded-full bg-gray-100 px-2 py-1 text-gray-700">
+                          Photo helpful
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="mt-5">
                       <a
-                        href={`/quote?service=furniture&item=${encodeURIComponent(it.title)}`}
-                        className="text-sm font-semibold text-gray-900 underline underline-offset-4"
+                        href={`/quote?service=appliances&item=${encodeURIComponent(it.id)}`}
+                        className="inline-flex w-full items-center justify-center rounded-2xl px-4 py-2 font-semibold bg-gray-900 text-white"
                       >
-                        Get a quote
+                        Get started
                       </a>
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          </section>
 
-          {/* HOW IT WORKS */}
-          <section className="px-4 py-12">
-            <div className="mx-auto max-w-6xl">
-              <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
-                How it works
-              </h2>
-
-              <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {steps.map((s, idx) => (
-                  <div key={s.title} className="rounded-2xl border border-gray-100 p-5">
-                    <div className="text-sm font-semibold text-gray-500">
-                      Step {idx + 1}
-                    </div>
-                    <div className="mt-2 text-lg font-semibold">{s.title}</div>
-                    <p className="mt-2 text-sm text-gray-600">{s.desc}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-10 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div className="rounded-2xl bg-gray-50 border border-gray-100 p-5">
-                  <h3 className="font-semibold">What’s included</h3>
-                  <ul className="mt-3 space-y-2 text-sm text-gray-700 list-disc list-inside">
-                    <li>Collection and disposal</li>
-                    <li>Licensed carrier handling</li>
-                    <li>Clear pricing confirmed before payment</li>
-                  </ul>
-                </div>
-                <div className="rounded-2xl bg-gray-50 border border-gray-100 p-5">
-                  <h3 className="font-semibold">Access requirements</h3>
-                  <ul className="mt-3 space-y-2 text-sm text-gray-700 list-disc list-inside">
-                    <li>Items should be accessible (driveway/kerbside where possible)</li>
-                    <li>Dismantling only if agreed in advance</li>
-                    <li>Please send photos for accurate quoting</li>
-                  </ul>
-                </div>
-                <div className="rounded-2xl bg-gray-50 border border-gray-100 p-5">
-                  <h3 className="font-semibold">Fridges & freezers</h3>
-                  <p className="mt-3 text-sm text-gray-700">
-                    We handle these correctly under WEEE rules. Please include a clear
-                    photo and note if it’s a fridge-freezer.
-                  </p>
-                </div>
+              <div className="mt-8 rounded-2xl border border-gray-100 bg-white p-5 text-sm text-gray-700">
+                <p className="font-semibold">Notes</p>
+                <ul className="mt-3 space-y-2 list-disc list-inside">
+                  <li>Fridges/freezers should be empty. Defrost where possible.</li>
+                  <li>Please send photos so we can confirm access and handling.</li>
+                  <li>Commercial units must be declared (different disposal costs).</li>
+                </ul>
               </div>
             </div>
           </section>
 
-          {/* CTA BAND */}
+          {/* CTA */}
           <section className="px-4 py-12 bg-gray-900">
             <div className="mx-auto max-w-6xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
               <div>
-                <h2 className="text-2xl sm:text-3xl font-semibold text-white">
-                  Ready to book?
-                </h2>
+                <h2 className="text-2xl sm:text-3xl font-semibold text-white">Ready to book?</h2>
                 <p className="mt-2 text-gray-300">
-                  Upload photos and we’ll confirm a fixed quote and collection slot.
+                  Choose an item above and click “Get started”.
                 </p>
               </div>
               <a
-                href="/quote?service=furniture"
+                href="/quote?service=appliances"
                 className="inline-flex items-center justify-center rounded-2xl px-6 py-3 text-base font-semibold bg-white text-gray-900 shadow-sm"
               >
                 Get a quote
@@ -167,8 +143,7 @@ export default function FurniturePage() {
           {/* FOOTER NOTE */}
           <footer className="px-4 py-10">
             <div className="mx-auto max-w-6xl text-xs text-gray-500">
-              Operated by Cox Skips & Waste Management Ltd. Licensed waste carrier. Terms
-              &amp; Privacy apply.
+              Operated by Cox Skips & Waste Management Ltd. Licensed waste carrier. Terms &amp; Privacy apply.
             </div>
           </footer>
         </main>
