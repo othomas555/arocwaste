@@ -2,41 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
+import { findRouteForPostcode, nextServiceDatesForDay } from "../../utils/postcode";
 import Layout from "../../components/layout";
 import appliances from "../../data/appliances";
 
 // ---- helpers ----
-function formatDateLabel(d) {
-  // e.g. "Mon 12 Jan"
-  return d.toLocaleDateString("en-GB", {
+function formatDateLabelFromISO(iso) {
+  // iso: YYYY-MM-DD
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString("en-GB", {
     weekday: "short",
     day: "2-digit",
     month: "short",
   });
-}
-
-function toISODate(d) {
-  // YYYY-MM-DD
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function getNextWorkingDays(count = 5) {
-  const days = [];
-  const d = new Date();
-  // start from tomorrow
-  d.setDate(d.getDate() + 1);
-
-  while (days.length < count) {
-    const day = d.getDay(); // 0=Sun, 6=Sat
-    if (day !== 0 && day !== 6) {
-      days.push(new Date(d));
-    }
-    d.setDate(d.getDate() + 1);
-  }
-  return days;
 }
 
 function findApplianceById(id) {
@@ -61,7 +40,6 @@ function getTitle(item) {
 }
 
 function getPrice(item) {
-  // normalize to number
   const p = item.price ?? item.basePrice ?? item.cost;
   const n = Number(p);
   return Number.isFinite(n) ? n : 0;
@@ -75,10 +53,9 @@ export default function BookAppliancePage() {
   const basePrice = useMemo(() => (item ? getPrice(item) : 0), [item]);
   const title = useMemo(() => (item ? getTitle(item) : ""), [item]);
 
-  const dateOptions = useMemo(() => getNextWorkingDays(5), []);
-
   // form state
   const [collectionDateISO, setCollectionDateISO] = useState("");
+
   const [timeOption, setTimeOption] = useState("any"); // any | morning | afternoon | twohour
   const [removeFromProperty, setRemoveFromProperty] = useState("no"); // no | yes
 
@@ -89,12 +66,37 @@ export default function BookAppliancePage() {
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
 
-  // default date = first option when ready
+  // postcode check state
+  const [postcodeChecked, setPostcodeChecked] = useState(false);
+
+  const route = useMemo(() => {
+    if (!postcodeChecked) return null;
+    return findRouteForPostcode(postcode);
+  }, [postcode, postcodeChecked]);
+
+  const allowedDates = useMemo(() => {
+    if (!route) return [];
+    // returns ["YYYY-MM-DD", ...]
+    return nextServiceDatesForDay(route.day, 5);
+  }, [route]);
+
+  // default date = first allowed option after a successful postcode check
   useEffect(() => {
-    if (!collectionDateISO && dateOptions.length > 0) {
-      setCollectionDateISO(toISODate(dateOptions[0]));
+    if (!route) {
+      setCollectionDateISO("");
+      return;
     }
-  }, [collectionDateISO, dateOptions]);
+    if (!collectionDateISO && allowedDates.length > 0) {
+      setCollectionDateISO(allowedDates[0]);
+    }
+  }, [route, allowedDates, collectionDateISO]);
+
+  // If user changes postcode after checking, force re-check + reset date
+  useEffect(() => {
+    if (!postcodeChecked) return;
+    // if they edit the postcode field after checking, we reset check flag in onChange anyway.
+    // This effect is just here if you later change UI.
+  }, [postcodeChecked]);
 
   const timeAddOn = useMemo(() => {
     if (timeOption === "morning") return 10;
@@ -112,19 +114,56 @@ export default function BookAppliancePage() {
   }, [basePrice, timeAddOn, removeAddOn]);
 
   const canContinue = useMemo(() => {
-    // Keep it “light” for now, but prevent empty essentials
     if (!item) return false;
+
+    // must have checked postcode + be in area
+    if (!postcodeChecked) return false;
+    if (!route) return false;
+
+    // must pick a valid route date
     if (!collectionDateISO) return false;
+    if (allowedDates.length > 0 && !allowedDates.includes(collectionDateISO)) return false;
+
+    // essentials
     if (!fullName.trim()) return false;
     if (!email.trim()) return false;
     if (!phone.trim()) return false;
     if (!postcode.trim()) return false;
     if (!address.trim()) return false;
+
     return true;
-  }, [item, collectionDateISO, fullName, email, phone, postcode, address]);
+  }, [
+    item,
+    postcodeChecked,
+    route,
+    collectionDateISO,
+    allowedDates,
+    fullName,
+    email,
+    phone,
+    postcode,
+    address,
+  ]);
 
   function onContinue() {
     if (!item) return;
+
+    if (!postcodeChecked) {
+      alert("Please check your postcode first.");
+      return;
+    }
+    if (!route) {
+      alert("Sorry — we don’t cover that postcode yet.");
+      return;
+    }
+    if (!collectionDateISO) {
+      alert("Please select a collection date.");
+      return;
+    }
+    if (allowedDates.length > 0 && !allowedDates.includes(collectionDateISO)) {
+      alert("Please select one of the available dates.");
+      return;
+    }
 
     const params = new URLSearchParams();
     params.set("item", item.id);
@@ -132,6 +171,11 @@ export default function BookAppliancePage() {
     params.set("base", String(basePrice));
 
     params.set("date", collectionDateISO);
+
+    // pass route info through
+    params.set("routeDay", route.day);
+    params.set("routeArea", route.area || "");
+
     params.set("time", timeOption);
     params.set("timeAdd", String(timeAddOn));
 
@@ -183,38 +227,90 @@ export default function BookAppliancePage() {
             <div className="grid gap-6 lg:grid-cols-3">
               {/* Left: form */}
               <div className="lg:col-span-2 space-y-6">
-                {/* Step 1 */}
+                {/* NEW: Postcode check */}
                 <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">1) Choose a collection date</h2>
-                  <p className="mt-1 text-gray-600">Next 5 working days (excluding weekends)</p>
+                  <h2 className="text-xl font-semibold">1) Check your area</h2>
+                  <p className="mt-1 text-gray-600">
+                    Enter your postcode to see what day we’re in your area.
+                  </p>
 
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {dateOptions.map((d) => {
-                      const iso = toISODate(d);
-                      const isSelected = collectionDateISO === iso;
-                      return (
-                        <button
-                          key={iso}
-                          type="button"
-                          onClick={() => setCollectionDateISO(iso)}
-                          className={[
-                            "rounded-xl border p-4 text-left transition",
-                            isSelected
-                              ? "border-black bg-gray-50"
-                              : "border-gray-200 bg-white hover:bg-gray-50",
-                          ].join(" ")}
-                        >
-                          <div className="text-sm text-gray-500">{iso}</div>
-                          <div className="mt-1 text-base font-medium">{formatDateLabel(d)}</div>
-                        </button>
-                      );
-                    })}
+                  <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <div className="flex-1">
+                      <label className="text-sm font-medium text-gray-700">Postcode</label>
+                      <input
+                        value={postcode}
+                        onChange={(e) => {
+                          setPostcode(e.target.value);
+                          setPostcodeChecked(false);
+                          setCollectionDateISO("");
+                        }}
+                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 uppercase outline-none focus:border-black"
+                        placeholder="e.g. NP20 1AB"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setPostcodeChecked(true)}
+                      className="inline-flex items-center justify-center rounded-xl bg-black px-5 py-3 text-white hover:opacity-90"
+                    >
+                      Check postcode
+                    </button>
                   </div>
+
+                  {postcodeChecked && !route && (
+                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
+                      Sorry — we don’t cover that postcode yet.
+                    </div>
+                  )}
+
+                  {postcodeChecked && route && (
+                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
+                      ✅ We cover <span className="font-medium">{route.area || "your area"}</span>. We’re in
+                      your area on <span className="font-medium">{route.day}</span>.
+                    </div>
+                  )}
                 </div>
 
-                {/* Step 2 */}
+                {/* Step 2: date selection now depends on route */}
                 <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">2) Choose a time option</h2>
+                  <h2 className="text-xl font-semibold">2) Choose a collection date</h2>
+                  <p className="mt-1 text-gray-600">
+                    {route ? `Next 5 available ${route.day}s` : "Check your postcode first to see available dates."}
+                  </p>
+
+                  {!route ? (
+                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
+                      Enter and check your postcode above to unlock dates.
+                    </div>
+                  ) : (
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      {allowedDates.map((iso) => {
+                        const isSelected = collectionDateISO === iso;
+                        return (
+                          <button
+                            key={iso}
+                            type="button"
+                            onClick={() => setCollectionDateISO(iso)}
+                            className={[
+                              "rounded-xl border p-4 text-left transition",
+                              isSelected
+                                ? "border-black bg-gray-50"
+                                : "border-gray-200 bg-white hover:bg-gray-50",
+                            ].join(" ")}
+                          >
+                            <div className="text-sm text-gray-500">{iso}</div>
+                            <div className="mt-1 text-base font-medium">{formatDateLabelFromISO(iso)}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 3 */}
+                <div className="rounded-2xl border bg-white p-6 shadow-sm">
+                  <h2 className="text-xl font-semibold">3) Choose a time option</h2>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <button
                       type="button"
@@ -274,12 +370,10 @@ export default function BookAppliancePage() {
                   </div>
                 </div>
 
-                {/* Step 3 */}
+                {/* Step 4 */}
                 <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">3) Remove from property?</h2>
-                  <p className="mt-1 text-gray-600">
-                    If the item isn’t outside ready for collection.
-                  </p>
+                  <h2 className="text-xl font-semibold">4) Remove from property?</h2>
+                  <p className="mt-1 text-gray-600">If the item isn’t outside ready for collection.</p>
 
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <button
@@ -312,9 +406,9 @@ export default function BookAppliancePage() {
                   </div>
                 </div>
 
-                {/* Step 4 */}
+                {/* Step 5 */}
                 <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">4) Your details</h2>
+                  <h2 className="text-xl font-semibold">5) Your details</h2>
 
                   <div className="mt-4 grid gap-4 sm:grid-cols-2">
                     <div>
@@ -348,15 +442,7 @@ export default function BookAppliancePage() {
                       />
                     </div>
 
-                    <div>
-                      <label className="text-sm font-medium text-gray-700">Postcode</label>
-                      <input
-                        value={postcode}
-                        onChange={(e) => setPostcode(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 uppercase outline-none focus:border-black"
-                        placeholder="CFxx xxx"
-                      />
-                    </div>
+                    {/* postcode field removed from here (it’s in step 1 now) */}
 
                     <div className="sm:col-span-2">
                       <label className="text-sm font-medium text-gray-700">Address</label>
@@ -432,7 +518,9 @@ export default function BookAppliancePage() {
                     <div className="flex items-start justify-between gap-4">
                       <div className="text-gray-700">
                         Remove from property{" "}
-                        <span className="text-gray-500">({removeFromProperty === "yes" ? "Yes" : "No"})</span>
+                        <span className="text-gray-500">
+                          ({removeFromProperty === "yes" ? "Yes" : "No"})
+                        </span>
                       </div>
                       <div className="font-medium">£{removeAddOn}</div>
                     </div>
@@ -445,6 +533,13 @@ export default function BookAppliancePage() {
                     <div className="pt-2 text-gray-600">
                       Collection date:{" "}
                       <span className="font-medium text-gray-900">{collectionDateISO || "—"}</span>
+                    </div>
+
+                    <div className="pt-1 text-gray-600">
+                      Route day:{" "}
+                      <span className="font-medium text-gray-900">
+                        {postcodeChecked ? (route ? route.day : "Out of area") : "—"}
+                      </span>
                     </div>
                   </div>
 
