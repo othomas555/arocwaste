@@ -1,19 +1,80 @@
-// data/furniture.js
+// data/appliances.js
 
-export const furnitureItems = [
-  { title: "Ovens", desc: "Single items or small sets. Ideal for quick collections." },
-  { title: Hobs", desc: "Single or multiple mattresses. Please keep dry if possible." },
-  { title: "Undercounter Fridge or Freezer", desc: "Undercounter fridge or freezer under 600mm wide" },
-  { title: "Wardrobes", desc: "Single wardrobes or flatpack units. Photos help for sizing." },
-  { title: "Tables & chairs", desc: "Dining tables, office desks, chairs and small furniture." },
-  { title: "White goods", desc: "Washing machines, cookers, tumble dryers and more." },
-  { title: "Fridges & freezers", desc: "Handled correctly under WEEE rules (photo required)." },
-  { title: "Mixed bulky load", desc: "A few bulky items together — easiest with photos." },
+export const applianceItems = [
+  {
+    id: "undercounter-fridge",
+    title: "Undercounter fridge or freezer",
+    desc: "Small undercounter unit. Photo required.",
+    price: 30,
+    photoRequired: true,
+  },
+  {
+    id: "upright-fridge-freezer",
+    title: "Upright fridge / fridge-freezer (up to 600mm)",
+    desc: "Standard kitchen fridge or fridge-freezer. Photo required.",
+    price: 50,
+    photoRequired: true,
+  },
+  {
+    id: "american-fridge-freezer",
+    title: "American-style fridge freezer",
+    desc: "Large double-door unit. Photo required.",
+    price: 65,
+    photoRequired: true,
+  },
+  {
+    id: "commercial-fridge",
+    title: "Commercial fridge or freezer",
+    desc: "Shop, catering or commercial unit. Photo required.",
+    price: 100,
+    photoRequired: true,
+  },
+
+  {
+    id: "washing-machine",
+    title: "Washing machine",
+    desc: "Please disconnect in advance if possible.",
+    price: 45,
+    photoRequired: false,
+  },
+  {
+    id: "tumble-dryer",
+    title: "Tumble dryer",
+    desc: "Vented or condenser dryer.",
+    price: 45,
+    photoRequired: false,
+  },
+  {
+    id: "dishwasher",
+    title: "Dishwasher",
+    desc: "Please disconnect in advance if possible.",
+    price: 45,
+    photoRequired: false,
+  },
+  {
+    id: "cooker-oven",
+    title: "Cooker / oven",
+    desc: "Freestanding preferred. Photo recommended.",
+    price: 55,
+    photoRequired: true,
+  },
+  {
+    id: "microwave",
+    title: "Microwave",
+    desc: "Small countertop appliance.",
+    price: 25,
+    photoRequired: false,
+  },
 ];
 
-export const furnitureSteps = [
-  { title: "Send photos", desc: "Upload a photo of the items and tell us your postcode." },
-  { title: "Get a fixed quote", desc: "We confirm price and what’s included — no surprises." },
-  { title: "Choose a slot", desc: "Pick a collection day that suits you." },
-  { title: "We collect & dispose", desc: "Collected by a licensed carrier and disposed responsibly." },
+export const timeOptions = [
+  { id: "any", title: "Any", price: 0, note: "Free" },
+  { id: "morning", title: "Morning", price: 10, note: "+£10.00" },
+  { id: "afternoon", title: "Afternoon", price: 10, note: "+£10.00" },
+  { id: "two-hour", title: "Choose 2 hour time slot", price: 25, note: "+£25.00" },
+];
+
+export const removalOptions = [
+  { id: "no", title: "No", price: 0, note: "Free" },
+  { id: "yes", title: "Yes", price: 20, note: "+£20.00" },
 ];
