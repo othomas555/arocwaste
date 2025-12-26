@@ -1,3 +1,3 @@
-body {
-  background: red !important;
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
