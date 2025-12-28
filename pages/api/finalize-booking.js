@@ -21,31 +21,16 @@ function buildPayloadFromStripeSession(session) {
   const md = session?.metadata || {};
   const mode = String(md.mode || "single");
 
-  // Start with metadata as base payload
   const payload = { ...md, mode };
-
-  // Ensure numeric fields are actually numbers (metadata is always strings)
   payload.timeAdd = Number(md.timeAdd ?? 0);
   payload.removeAdd = Number(md.removeAdd ?? 0);
 
-  // Basket: parse items_json into payload.items
+  // No full basket items stored in Stripe metadata anymore.
+  // If Supabase insert failed earlier, we can only keep a short summary.
   if (mode === "basket") {
-    const raw = String(md.items_json || "");
-    const items = safeJsonParse(raw, []);
-    const cleanItems = Array.isArray(items)
-      ? items
-          .filter((x) => x && x.title)
-          .map((x) => ({
-            id: String(x.id || ""),
-            category: String(x.category || ""),
-            slug: String(x.slug || ""),
-            title: String(x.title || ""),
-            unitPrice: Number(x.unitPrice || 0),
-            qty: clampQty(x.qty),
-          }))
-      : [];
-
-    payload.items = cleanItems;
+    payload.items = []; // unknown in fallback
+    payload.items_summary = String(md.items_summary || "");
+    payload.item_count = Number(md.item_count ?? 0);
   }
 
   return payload;
