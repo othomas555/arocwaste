@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { kv } from "@vercel/kv";
+import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -9,7 +9,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ✅ Fail fast with a useful message
   if (!secretKey || !secretKey.startsWith("sk_")) {
     return res.status(500).json({
       error:
@@ -17,7 +16,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // Use a fixed apiVersion for consistency
   const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
 
   try {
@@ -39,6 +37,7 @@ export default async function handler(req, res) {
     }
 
     const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+    const totalPence = Math.round(totalPounds * 100);
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -49,7 +48,7 @@ export default async function handler(req, res) {
           quantity: 1,
           price_data: {
             currency: "gbp",
-            unit_amount: Math.round(totalPounds * 100),
+            unit_amount: totalPence,
             product_data: {
               name: `AROC Waste – ${title}`,
               description: `Collection on ${date}`,
@@ -78,43 +77,54 @@ export default async function handler(req, res) {
       cancel_url: `${origin}/cancel`,
     });
 
-    // ✅ Save pending booking payload for finalize step (best effort)
-    // This allows /api/finalize-booking to create AROC-xxxxx + store the booking.
-    try {
-      await kv.set(
-        `booking:pending:${session.id}`,
+    // ✅ Store pending booking in Supabase (idempotent via stripe_session_id unique)
+    const payload = {
+      title: String(body.title ?? ""),
+      base: Number(body.base ?? 0),
+      time: String(body.time ?? ""),
+      timeAdd: Number(body.timeAdd ?? 0),
+      remove: String(body.remove ?? ""),
+      removeAdd: Number(body.removeAdd ?? 0),
+      date: String(body.date ?? ""),
+      routeDay: String(body.routeDay ?? ""),
+      routeArea: String(body.routeArea ?? ""),
+      name: String(body.name ?? ""),
+      phone: String(body.phone ?? ""),
+      postcode: String(body.postcode ?? ""),
+      address: String(body.address ?? ""),
+      notes: String(body.notes ?? ""),
+      total: Number(body.total ?? 0),
+    };
+
+    const { error: upsertErr } = await supabaseAdmin
+      .from("bookings")
+      .upsert(
         {
-          customer: {
-            name: String(body.name ?? ""),
-            email: String(body.email ?? ""),
-            phone: String(body.phone ?? ""),
-            postcode: String(body.postcode ?? ""),
-            address: String(body.address ?? ""),
-          },
-          booking: {
-            title: String(body.title ?? ""),
-            base: Number(body.base ?? 0),
-            time: String(body.time ?? ""),
-            timeAdd: Number(body.timeAdd ?? 0),
-            remove: String(body.remove ?? ""),
-            removeAdd: Number(body.removeAdd ?? 0),
-            date: String(body.date ?? ""),
-            routeDay: String(body.routeDay ?? ""),
-            routeArea: String(body.routeArea ?? ""),
-            notes: String(body.notes ?? ""),
-            total: Number(body.total ?? 0),
-          },
+          stripe_session_id: session.id,
+          payment_status: "pending",
+          title: String(body.title ?? ""),
+          collection_date: String(body.date ?? ""),
+          name: String(body.name ?? ""),
+          email: String(body.email ?? ""),
+          phone: String(body.phone ?? ""),
+          postcode: String(body.postcode ?? ""),
+          address: String(body.address ?? ""),
+          notes: String(body.notes ?? ""),
+          route_day: String(body.routeDay ?? ""),
+          route_area: String(body.routeArea ?? ""),
+          total_pence: totalPence,
+          payload,
         },
-        { ex: 60 * 60 * 24 } // 24 hours
+        { onConflict: "stripe_session_id" }
       );
-    } catch (e) {
-      // If KV isn't configured yet, payments still work — we just can't store pending booking.
-      // No need to error.
+
+    if (upsertErr) {
+      console.error("Supabase upsert error:", upsertErr.message);
+      // Don't block checkout — payment can still proceed even if storage fails
     }
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
-    // ✅ Return the real Stripe error message (massively speeds up debugging)
     const msg =
       err?.raw?.message ||
       err?.message ||
