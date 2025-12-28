@@ -9,6 +9,14 @@ function clampQty(n) {
   return Math.max(1, Math.min(50, Math.trunc(x)));
 }
 
+function buildItemsSummary(items) {
+  const clean = Array.isArray(items) ? items.filter((x) => x && x.title) : [];
+  if (!clean.length) return "";
+  const first = String(clean[0].title || "Item");
+  if (clean.length === 1) return first;
+  return `${first} + ${clean.length - 1} more`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -26,7 +34,6 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body || {};
-
     const mode = String(body.mode || "single"); // "single" or "basket"
 
     const email = body.email;
@@ -36,7 +43,6 @@ export default async function handler(req, res) {
 
     const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
 
-    // Shared totals
     const totalPounds = Number(body.total);
     if (!Number.isFinite(totalPounds) || totalPounds <= 0) {
       return res.status(400).json({ error: "Invalid total amount" });
@@ -70,13 +76,9 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Basket is empty" });
       }
 
-      // Add-ons
       const timeAdd = Number(body.timeAdd ?? 0);
       const removeAdd = Number(body.removeAdd ?? 0);
 
-      // Stripe line items: one per basket item (+ add-ons as separate items if > 0)
-      // IMPORTANT: To guarantee totals match UI, we also include an "Order total adjustment" line if needed.
-      // (This prevents rounding/price drift causing mismatch.)
       const lineItems = [];
 
       for (const it of cleanItems) {
@@ -118,7 +120,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // Verify computed stripe total vs UI total; add adjustment if needed
+      // Ensure Stripe total matches UI total (small adjustment only)
       const computedPence = lineItems.reduce((sum, li) => {
         const qty = Number(li.quantity) || 0;
         const amt = Number(li.price_data?.unit_amount) || 0;
@@ -127,7 +129,6 @@ export default async function handler(req, res) {
 
       const diff = totalPence - computedPence;
       if (diff !== 0) {
-        // Only allow small adjustments. If huge mismatch, error out.
         if (Math.abs(diff) > 500) {
           return res.status(400).json({
             error:
@@ -148,15 +149,19 @@ export default async function handler(req, res) {
         });
       }
 
+      const itemsSummary = buildItemsSummary(cleanItems);
+
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
         payment_method_types: ["card"],
         customer_email: email,
         line_items: lineItems,
 
+        // ✅ Keep metadata small (<= 500 chars each)
         metadata: {
           mode: "basket",
-          items_json: JSON.stringify(cleanItems).slice(0, 4500), // Stripe metadata limit safety
+          item_count: String(cleanItems.length),
+          items_summary: itemsSummary, // short summary only
           time: String(body.time ?? ""),
           timeAdd: String(body.timeAdd ?? ""),
           remove: String(body.remove ?? ""),
@@ -176,7 +181,7 @@ export default async function handler(req, res) {
         cancel_url: `${origin}/cancel`,
       });
 
-      // Supabase upsert (best effort)
+      // Supabase upsert (best effort) — ✅ full items stored here
       try {
         const supabaseAdmin = getSupabaseAdmin();
 
@@ -237,7 +242,6 @@ export default async function handler(req, res) {
     // ---- SINGLE MODE (existing behaviour) ----
     const title = body.title;
 
-    // ✅ Quantity (default 1)
     const qtyRaw = Number(body.qty ?? 1);
     const qty = Number.isInteger(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
 
@@ -250,7 +254,6 @@ export default async function handler(req, res) {
       payment_method_types: ["card"],
       customer_email: email,
 
-      // Keep 1 line-item that represents the whole booking total
       line_items: [
         {
           quantity: 1,
