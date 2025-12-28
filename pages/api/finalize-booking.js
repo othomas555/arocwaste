@@ -3,6 +3,54 @@ import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
+function safeJsonParse(str, fallback) {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return fallback;
+  }
+}
+
+function clampQty(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 1;
+  return Math.max(1, Math.min(50, Math.trunc(x)));
+}
+
+function buildPayloadFromStripeSession(session) {
+  const md = session?.metadata || {};
+  const mode = String(md.mode || "single");
+
+  // Start with metadata as base payload
+  const payload = { ...md, mode };
+
+  // Ensure numeric fields are actually numbers (metadata is always strings)
+  payload.timeAdd = Number(md.timeAdd ?? 0);
+  payload.removeAdd = Number(md.removeAdd ?? 0);
+
+  // Basket: parse items_json into payload.items
+  if (mode === "basket") {
+    const raw = String(md.items_json || "");
+    const items = safeJsonParse(raw, []);
+    const cleanItems = Array.isArray(items)
+      ? items
+          .filter((x) => x && x.title)
+          .map((x) => ({
+            id: String(x.id || ""),
+            category: String(x.category || ""),
+            slug: String(x.slug || ""),
+            title: String(x.title || ""),
+            unitPrice: Number(x.unitPrice || 0),
+            qty: clampQty(x.qty),
+          }))
+      : [];
+
+    payload.items = cleanItems;
+  }
+
+  return payload;
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -57,13 +105,22 @@ export default async function handler(req, res) {
 
     // 4) If missing, create it from Stripe metadata (fallback)
     if (!existing) {
+      const payload = buildPayloadFromStripeSession(session);
+
+      // Title: for basket we use "Basket order" as a safe default
+      const mode = String(payload.mode || "single");
+      const title =
+        mode === "basket"
+          ? "Basket order"
+          : session.metadata?.title || "AROC Waste Booking";
+
       const { data: created, error: insErr } = await supabaseAdmin
         .from("bookings")
         .insert({
           stripe_session_id: session_id,
           stripe_payment_intent_id: session.payment_intent?.id || null,
           payment_status: "paid",
-          title: session.metadata?.title || "AROC Waste Booking",
+          title,
           collection_date: session.metadata?.date || "",
           name: session.metadata?.name || "",
           email:
@@ -78,7 +135,7 @@ export default async function handler(req, res) {
           route_day: session.metadata?.routeDay || "",
           route_area: session.metadata?.routeArea || "",
           total_pence: session.amount_total ?? 0,
-          payload: session.metadata || null,
+          payload,
         })
         .select("booking_ref")
         .single();
@@ -118,9 +175,10 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true, bookingRef: updated.booking_ref });
   } catch (err) {
-    // ✅ Return the real error message
     const msg = err?.message || "Unknown server error";
     console.error("finalize-booking error:", err);
-    return res.status(500).json({ error: "Server error finalizing booking", detail: msg });
+    return res
+      .status(500)
+      .json({ error: "Server error finalizing booking", detail: msg });
   }
 }
