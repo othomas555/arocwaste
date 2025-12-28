@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
+import { getsupabaseAdmin } from "../../lib/supabaseAdmin";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -77,7 +77,12 @@ export default async function handler(req, res) {
       cancel_url: `${origin}/cancel`,
     });
 
-    // ✅ Store pending booking in Supabase (idempotent via stripe_session_id unique)
+    // ✅ Store pending booking in Supabase (best effort)
+// Never block checkout if Supabase isn't configured yet.
+try {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  if (supabaseAdmin) {
     const payload = {
       title: String(body.title ?? ""),
       base: Number(body.base ?? 0),
@@ -118,10 +123,13 @@ export default async function handler(req, res) {
         { onConflict: "stripe_session_id" }
       );
 
-    if (upsertErr) {
-      console.error("Supabase upsert error:", upsertErr.message);
-      // Don't block checkout — payment can still proceed even if storage fails
-    }
+    if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
+  } else {
+    console.warn("Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save.");
+  }
+} catch (e) {
+  console.error("Supabase save failed:", e?.message || e);
+}
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
