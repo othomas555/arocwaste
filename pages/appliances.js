@@ -11,180 +11,247 @@ function formatGBP(amount) {
   }).format(amount);
 }
 
+function getMostBooked(items) {
+  // Prefer a popular item if available, otherwise first item.
+  const popular = items.find((i) => i.popular);
+  return popular || items[0] || null;
+}
+
 export default function AppliancesPage() {
   const popular = appliances.filter((i) => i.popular);
   const all = appliances;
+  const mostBooked = getMostBooked(appliances);
 
   return (
     <Layout
       title="Appliance Collection | AROC Waste"
-      description="Book an appliance collection online. Choose your item, pick a date, add any extras, and pay securely."
+      description="Book an appliance collection online. Choose your item, pick a date, add extras, and pay securely."
     >
-      <div className="bg-slate-950">
-        <div className="mx-auto max-w-6xl px-4 py-12 sm:py-16">
-          <div className="grid gap-10 lg:grid-cols-12 lg:items-center">
-            <div className="lg:col-span-7">
-              <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-white/90 ring-1 ring-white/15">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                Appliance collections in South Wales
-              </div>
-
-              <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-                Appliance collection, booked online.
-              </h1>
-              <p className="mt-3 max-w-2xl text-base leading-relaxed text-white/80">
-                Pick your item, choose a collection date, add any extras (like timed
-                arrival or remove-from-property), then pay securely. Simple, fast,
-                and fully tracked.
-              </p>
-
-              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
-                <Link
-                  href="#items"
-                  className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-white/95"
-                >
-                  Browse appliance items
-                </Link>
-                <Link
-                  href="/book/appliances"
-                  className="inline-flex items-center justify-center rounded-xl bg-white/10 px-5 py-3 text-sm font-semibold text-white ring-1 ring-white/15 transition hover:bg-white/15"
-                >
-                  Start booking
-                </Link>
-              </div>
-
-              <div className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {[
-                  { label: "Secure card payment", value: "Stripe Checkout" },
-                  { label: "Flexible extras", value: "Time + removal" },
-                  { label: "Instant confirmation", value: "Email receipt" },
-                  { label: "Simple pricing", value: "Per-item + qty" },
-                ].map((x) => (
-                  <div
-                    key={x.label}
-                    className="rounded-2xl bg-white/5 p-4 ring-1 ring-white/10"
-                  >
-                    <div className="text-xs text-white/70">{x.label}</div>
-                    <div className="mt-1 text-sm font-semibold text-white">
-                      {x.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
+      {/* Page background like Furniture */}
+      <div className="bg-white">
+        <div className="mx-auto max-w-6xl px-4 py-10 sm:py-12">
+          {/* Top crumb + hero row */}
+          <div className="mb-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700">
+              <span className="text-slate-400">AROC Waste</span>
+              <span className="text-slate-300">•</span>
+              <span>Appliance collections</span>
             </div>
 
-            <div className="lg:col-span-5">
-              <div className="rounded-3xl bg-white/5 p-6 ring-1 ring-white/10">
-                <div className="text-sm font-semibold text-white">
-                  Popular items
-                </div>
-                <p className="mt-1 text-sm text-white/75">
-                  Click an item to start your booking.
+            <div className="mt-5 grid gap-6 lg:grid-cols-12 lg:items-start">
+              {/* Left hero text */}
+              <div className="lg:col-span-7">
+                <h1 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
+                  Appliance collection, booked online.
+                </h1>
+                <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-600">
+                  Choose the closest match, pick a collection date for your area,
+                  add extras if needed (timed arrival or remove-from-property),
+                  then pay securely online.
                 </p>
 
-                <div className="mt-4 grid gap-3">
-                  {popular.map((item) => (
+                <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <Link
+                    href="#items"
+                    className="inline-flex items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+                  >
+                    View items
+                  </Link>
+                  <Link
+                    href="/book/appliances"
+                    className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50"
+                  >
+                    Start a booking →
+                  </Link>
+                </div>
+
+                <div className="mt-6 flex flex-wrap gap-2">
+                  {[
+                    "Card payments",
+                    "Fast booking",
+                    "Responsible disposal",
+                  ].map((chip) => (
+                    <span
+                      key={chip}
+                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700"
+                    >
+                      {chip}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Right "Most booked" card */}
+              <div className="lg:col-span-5">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="text-xs font-semibold text-slate-500">
+                    Most booked
+                  </div>
+
+                  {mostBooked ? (
+                    <>
+                      <div className="mt-2 text-base font-semibold text-slate-900">
+                        {mostBooked.title}
+                      </div>
+                      <div className="mt-1 text-sm text-slate-600">
+                        From {formatGBP(mostBooked.price)}
+                      </div>
+
+                      <Link
+                        href={`/book/appliances?item=${encodeURIComponent(
+                          mostBooked.slug
+                        )}`}
+                        className="mt-4 inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+                      >
+                        Get started
+                      </Link>
+
+                      <p className="mt-3 text-xs text-slate-500">
+                        Tip: Add notes during checkout if access is tight or parking is limited.
+                      </p>
+                    </>
+                  ) : (
+                    <div className="mt-2 text-sm text-slate-600">
+                      No items found.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Divider band like Furniture section area */}
+          <div className="-mx-4 border-t border-slate-200 bg-slate-50 px-4 py-10 sm:py-12">
+            <div className="mx-auto max-w-6xl">
+              {/* Popular items */}
+              {popular.length > 0 && (
+                <>
+                  <div className="mb-5">
+                    <h2 className="text-xl font-semibold text-slate-900">
+                      Popular items
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-600">
+                      The most common appliance collections we do.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {popular.map((item) => (
+                      <Link
+                        key={item.slug}
+                        href={`/book/appliances?item=${encodeURIComponent(
+                          item.slug
+                        )}`}
+                        className="group flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300"
+                      >
+                        <div className="flex items-center gap-4">
+                          {/* Simple icon placeholder like furniture cards */}
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
+                            <span className="text-lg">▦</span>
+                          </div>
+
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">
+                              {item.title}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-600">
+                              {item.subtitle}
+                            </div>
+
+                            <div className="mt-3">
+                              <span className="inline-flex items-center rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-white">
+                                Popular
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col items-end gap-3">
+                          <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
+                            {formatGBP(item.price)}
+                            <span className="text-slate-400 font-normal">
+                              from
+                            </span>
+                          </div>
+
+                          <span className="inline-flex items-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition group-hover:bg-slate-800">
+                            Get started →
+                          </span>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* All items */}
+              <div className={popular.length > 0 ? "mt-12" : ""} id="items">
+                <h2 className="text-xl font-semibold text-slate-900">
+                  All appliance items
+                </h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Choose the closest match — you can add notes at checkout. Quantity can be adjusted during booking.
+                </p>
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                  {all.map((item) => (
                     <Link
                       key={item.slug}
                       href={`/book/appliances?item=${encodeURIComponent(
                         item.slug
                       )}`}
-                      className="group flex items-center justify-between gap-4 rounded-2xl bg-white/5 px-4 py-3 ring-1 ring-white/10 transition hover:bg-white/10"
+                      className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300"
                     >
-                      <div>
-                        <div className="text-sm font-semibold text-white">
-                          {item.title}
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex items-start gap-4">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
+                            <span className="text-lg">▦</span>
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">
+                              {item.title}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-600">
+                              {item.subtitle}
+                            </div>
+
+                            <div className="mt-3 text-xs text-slate-500">
+                              Quick online booking
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-xs text-white/70">
-                          {item.subtitle}
+
+                        <div className="flex flex-col items-end gap-3">
+                          <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
+                            {formatGBP(item.price)}
+                            <span className="text-slate-400 font-normal">
+                              from
+                            </span>
+                          </div>
+
+                          <span className="inline-flex items-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition group-hover:bg-slate-800">
+                            Get started →
+                          </span>
                         </div>
-                      </div>
-                      <div className="shrink-0 text-sm font-semibold text-white">
-                        {formatGBP(item.price)}
-                        <span className="ml-2 text-white/60 transition group-hover:translate-x-0.5">
-                          →
-                        </span>
                       </div>
                     </Link>
                   ))}
                 </div>
 
-                <div className="mt-5 rounded-2xl bg-emerald-500/10 p-4 ring-1 ring-emerald-500/20">
-                  <div className="text-sm font-semibold text-emerald-200">
-                    Need items removed from inside?
-                  </div>
-                  <p className="mt-1 text-sm text-emerald-100/80">
-                    You can add “Remove from property” during booking.
+                {/* Helpful note box like Furniture */}
+                <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <h3 className="text-base font-semibold text-slate-900">
+                    Extras available during booking
+                  </h3>
+                  <p className="mt-2 text-sm text-slate-600">
+                    You can add timed arrival options and “Remove from property” if items
+                    need to come from inside.
                   </p>
                 </div>
               </div>
             </div>
           </div>
-
-          <div id="items" className="mt-12 sm:mt-16">
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">
-                  All appliance items
-                </h2>
-                <p className="mt-1 text-sm text-white/70">
-                  Straightforward per-item pricing. Quantity can be adjusted in the booking flow.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {all.map((item) => (
-                <Link
-                  key={item.slug}
-                  href={`/book/appliances?item=${encodeURIComponent(item.slug)}`}
-                  className="group rounded-3xl bg-white/5 p-5 ring-1 ring-white/10 transition hover:bg-white/10"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="text-base font-semibold text-white">
-                        {item.title}
-                      </div>
-                      <div className="mt-1 text-sm text-white/70">
-                        {item.subtitle}
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 rounded-2xl bg-white/10 px-3 py-1 text-sm font-semibold text-white ring-1 ring-white/10">
-                      {formatGBP(item.price)}
-                    </div>
-                  </div>
-
-                  <div className="mt-4 flex items-center justify-between">
-                    <div className="text-xs text-white/60">
-                      Click to book →
-                    </div>
-                    {item.popular ? (
-                      <span className="rounded-full bg-emerald-400/15 px-2 py-1 text-xs font-medium text-emerald-200 ring-1 ring-emerald-400/20">
-                        Popular
-                      </span>
-                    ) : (
-                      <span className="text-xs text-white/40"> </span>
-                    )}
-                  </div>
-                </Link>
-              ))}
-            </div>
-
-            <div className="mt-10 rounded-3xl bg-white/5 p-6 ring-1 ring-white/10">
-              <h3 className="text-base font-semibold text-white">
-                What happens next?
-              </h3>
-              <ul className="mt-2 grid gap-2 text-sm text-white/75 sm:grid-cols-2">
-                <li>• Choose your item</li>
-                <li>• Enter postcode (we’ll confirm your route/day)</li>
-                <li>• Pick an available collection date</li>
-                <li>• Add time options / removal-from-property if needed</li>
-                <li>• Adjust quantity</li>
-                <li>• Pay securely and get instant confirmation</li>
-              </ul>
-            </div>
-          </div>
+          {/* end band */}
         </div>
       </div>
     </Layout>
