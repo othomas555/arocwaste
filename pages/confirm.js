@@ -1,115 +1,248 @@
+import { useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import Layout from "../components/layout";
 
-function labelTimeOption(v) {
-  if (v === "morning") return "Morning (+£10)";
-  if (v === "afternoon") return "Afternoon (+£10)";
-  if (v === "twohour") return "2-hour slot (+£25)";
-  return "Any time (£0)";
+function money(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return "£0.00";
+  return `£${num.toFixed(2)}`;
+}
+
+function formatISO(iso) {
+  if (!iso) return "—";
+  const [y, m, d] = String(iso).split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function prettyTimeOption(key) {
+  if (key === "morning") return "Morning (+£10)";
+  if (key === "afternoon") return "Afternoon (+£10)";
+  if (key === "twohour") return "2-hour slot (+£25)";
+  return "Any time";
 }
 
 export default function ConfirmPage() {
   const router = useRouter();
   const q = router.query;
 
-  const total = q.total ? Number(q.total) : null;
+  const data = useMemo(() => {
+    return {
+      item: q.item || "",
+      title: q.title || "",
+      base: q.base || 0,
+
+      date: q.date || "",
+      routeDay: q.routeDay || "",
+      routeArea: q.routeArea || "",
+
+      time: q.time || "any",
+      timeAdd: q.timeAdd || 0,
+
+      remove: q.remove || "no",
+      removeAdd: q.removeAdd || 0,
+
+      name: q.name || "",
+      email: q.email || "",
+      phone: q.phone || "",
+      postcode: q.postcode || "",
+      address: q.address || "",
+      notes: q.notes || "",
+
+      total: q.total || 0,
+    };
+  }, [q]);
+
+  const hasBasics =
+    data.title &&
+    data.date &&
+    data.name &&
+    data.email &&
+    data.phone &&
+    data.postcode &&
+    data.address;
 
   return (
     <Layout>
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        <div className="rounded-2xl border bg-white p-6 shadow-sm">
-          <h1 className="text-3xl font-semibold">Confirmation (placeholder)</h1>
-          <p className="mt-2 text-gray-600">
-            This page is just to prove the booking flow works. No payment is taken.
-          </p>
+      <div className="bg-[#f7f9ff]">
+        <div className="mx-auto max-w-5xl px-4 py-12">
+          <div className="mb-6">
+            <Link href="/" className="text-sm text-slate-600 hover:underline">
+              ← Back to home
+            </Link>
+            <h1 className="mt-2 text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900">
+              Confirm your booking
+            </h1>
+            <p className="mt-2 text-slate-600">
+              Check the details below. Payment is the next step (we’ll enable it once you’re happy).
+            </p>
+          </div>
 
-          <div className="mt-6 grid gap-4">
-            <div className="rounded-xl bg-gray-50 p-4">
-              <div className="text-sm text-gray-500">Item</div>
-              <div className="mt-1 text-lg font-medium text-gray-900">
-                {q.title || q.item || "—"}
-              </div>
-              {q.base && (
-                <div className="mt-1 text-sm text-gray-600">Base price: £{q.base}</div>
-              )}
-            </div>
+          <div className="grid gap-6 lg:grid-cols-3">
+            {/* Left: details */}
+            <div className="lg:col-span-2 space-y-6">
+              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900">Collection details</h2>
 
-            <div className="rounded-xl border p-4">
-              <div className="text-sm font-medium text-gray-900">Chosen options</div>
-              <div className="mt-3 space-y-2 text-sm text-gray-700">
-                <div>
-                  <span className="text-gray-500">Collection date:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.date || "—"}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Time:</span>{" "}
-                  <span className="font-medium text-gray-900">{labelTimeOption(q.time)}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Remove from property:</span>{" "}
-                  <span className="font-medium text-gray-900">
-                    {q.remove === "yes" ? "Yes (+£20)" : "No (£0)"}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-xl border p-4">
-              <div className="text-sm font-medium text-gray-900">Customer details</div>
-              <div className="mt-3 space-y-2 text-sm text-gray-700">
-                <div>
-                  <span className="text-gray-500">Name:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.name || "—"}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Email:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.email || "—"}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Phone:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.phone || "—"}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Postcode:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.postcode || "—"}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Address:</span>{" "}
-                  <span className="font-medium text-gray-900">{q.address || "—"}</span>
-                </div>
-                {q.notes ? (
+                <div className="mt-4 grid gap-4 sm:grid-cols-2 text-sm">
                   <div>
-                    <span className="text-gray-500">Notes:</span>{" "}
-                    <span className="font-medium text-gray-900">{q.notes}</span>
+                    <div className="text-slate-500">Service</div>
+                    <div className="font-semibold text-slate-900">{data.title || "—"}</div>
                   </div>
-                ) : null}
+
+                  <div>
+                    <div className="text-slate-500">Collection date</div>
+                    <div className="font-semibold text-slate-900">{formatISO(data.date)}</div>
+                  </div>
+
+                  <div>
+                    <div className="text-slate-500">Time option</div>
+                    <div className="font-semibold text-slate-900">
+                      {prettyTimeOption(data.time)}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-slate-500">Remove from property</div>
+                    <div className="font-semibold text-slate-900">
+                      {data.remove === "yes" ? "Yes (+£20)" : "No"}
+                    </div>
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <div className="text-slate-500">Address</div>
+                    <div className="font-semibold text-slate-900">
+                      {data.address}
+                      {data.postcode ? `, ${data.postcode}` : ""}
+                    </div>
+                  </div>
+
+                  {data.routeDay && (
+                    <div className="sm:col-span-2">
+                      <div className="text-slate-500">Route</div>
+                      <div className="font-semibold text-slate-900">
+                        {data.routeArea ? `${data.routeArea} — ` : ""}
+                        {data.routeDay}
+                      </div>
+                    </div>
+                  )}
+
+                  {data.notes && (
+                    <div className="sm:col-span-2">
+                      <div className="text-slate-500">Notes</div>
+                      <div className="text-slate-900">{data.notes}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900">Customer details</h2>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2 text-sm">
+                  <div>
+                    <div className="text-slate-500">Name</div>
+                    <div className="font-semibold text-slate-900">{data.name || "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500">Phone</div>
+                    <div className="font-semibold text-slate-900">{data.phone || "—"}</div>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <div className="text-slate-500">Email</div>
+                    <div className="font-semibold text-slate-900">{data.email || "—"}</div>
+                  </div>
+                </div>
+
+                {!hasBasics && (
+                  <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">
+                    Some details look missing. Go back and complete the form before payment.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900">What happens next?</h2>
+                <ol className="mt-4 space-y-2 text-sm text-slate-700 list-decimal pl-5">
+                  <li>You’ll pay securely by card (Stripe) — we’ll enable this next.</li>
+                  <li>You’ll receive a confirmation email with your booking summary.</li>
+                  <li>Our driver collects on your chosen date/time option.</li>
+                </ol>
               </div>
             </div>
 
-            <div className="rounded-xl bg-black p-4 text-white flex items-center justify-between">
-              <div className="font-semibold">Total</div>
-              <div className="text-xl font-semibold">
-                {total === null || Number.isNaN(total) ? "—" : `£${total}`}
+            {/* Right: pricing summary */}
+            <div className="space-y-6">
+              <div className="sticky top-6 rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900">Price summary</h2>
+
+                <div className="mt-4 space-y-3 text-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Base price</div>
+                    <div className="font-semibold text-slate-900">{money(data.base)}</div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Time option</div>
+                    <div className="font-semibold text-slate-900">{money(data.timeAdd)}</div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Remove from property</div>
+                    <div className="font-semibold text-slate-900">{money(data.removeAdd)}</div>
+                  </div>
+
+                  <div className="border-t border-slate-200 pt-3 flex items-start justify-between gap-4">
+                    <div className="font-extrabold text-slate-900">Total</div>
+                    <div className="font-extrabold text-slate-900">{money(data.total)}</div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled
+                  className="mt-6 w-full rounded-2xl bg-slate-300 px-6 py-3 text-sm font-semibold text-white cursor-not-allowed"
+                >
+                  Pay now (coming next)
+                </button>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => router.back()}
+                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold hover:border-slate-300"
+                  >
+                    Back
+                  </button>
+
+                  <Link
+                    href="/contact"
+                    className="inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
+                  >
+                    Need help?
+                  </Link>
+                </div>
+
+                <p className="mt-4 text-xs text-slate-500">
+                  Tip: next step is enabling Stripe checkout so customers can pay by card.
+                </p>
               </div>
             </div>
+          </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:justify-between">
-              <Link
-                href="/appliances"
-                className="inline-flex items-center justify-center rounded-xl border border-gray-200 bg-white px-5 py-3 text-gray-900 hover:bg-gray-50"
-              >
-                Back to appliances
-              </Link>
-
-              <button
-                type="button"
-                onClick={() => router.back()}
-                className="inline-flex items-center justify-center rounded-xl bg-black px-5 py-3 text-white hover:opacity-90"
-              >
-                Back to edit
-              </button>
-            </div>
+          <div className="mt-10 text-center text-sm text-slate-600">
+            Prefer to book by phone? Call{" "}
+            <a className="font-semibold text-indigo-600 hover:underline" href="tel:01656470040">
+              01656 470040
+            </a>
+            .
           </div>
         </div>
       </div>
