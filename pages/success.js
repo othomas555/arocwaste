@@ -3,14 +3,9 @@ import Link from "next/link";
 import Layout from "../components/layout";
 
 export default function SuccessPage() {
-  const [state, setState] = useState({
-    loading: true,
-    error: "",
-    bookingRef: "",
-    booking: null,
-    session: null,
-    warning: "",
-  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [bookingRef, setBookingRef] = useState("");
 
   useEffect(() => {
     const run = async () => {
@@ -18,11 +13,8 @@ export default function SuccessPage() {
       const session_id = params.get("session_id");
 
       if (!session_id) {
-        setState((s) => ({
-          ...s,
-          loading: false,
-          error: "Missing session_id. Please check your Stripe redirect URL.",
-        }));
+        setError("Missing session_id. Please check your Stripe redirect URL.");
+        setLoading(false);
         return;
       }
 
@@ -34,29 +26,18 @@ export default function SuccessPage() {
         });
 
         const data = await res.json();
+
         if (!res.ok) {
-          setState((s) => ({
-            ...s,
-            loading: false,
-            error: data?.error || "Could not verify payment.",
-          }));
+          setError(data?.error || "Could not verify payment.");
+          setLoading(false);
           return;
         }
 
-        setState({
-          loading: false,
-          error: "",
-          bookingRef: data.bookingRef || "",
-          booking: data.booking || null,
-          session: data.session || null,
-          warning: data.warning || "",
-        });
+        setBookingRef(data.bookingRef || "");
+        setLoading(false);
       } catch (e) {
-        setState((s) => ({
-          ...s,
-          loading: false,
-          error: "Network error verifying payment.",
-        }));
+        setError("Network error verifying payment.");
+        setLoading(false);
       }
     };
 
@@ -67,7 +48,7 @@ export default function SuccessPage() {
     <Layout>
       <div className="max-w-2xl mx-auto px-4 py-10">
         <div className="bg-white rounded-2xl shadow-sm border p-6">
-          {state.loading ? (
+          {loading ? (
             <>
               <h1 className="text-2xl font-semibold">Payment received</h1>
               <p className="mt-2 text-gray-600">
@@ -75,10 +56,10 @@ export default function SuccessPage() {
               </p>
               <div className="mt-6 h-10 w-full animate-pulse bg-gray-100 rounded-lg" />
             </>
-          ) : state.error ? (
+          ) : error ? (
             <>
               <h1 className="text-2xl font-semibold">We couldn’t confirm that</h1>
-              <p className="mt-2 text-gray-600">{state.error}</p>
+              <p className="mt-2 text-gray-600">{error}</p>
               <div className="mt-6 flex gap-3">
                 <Link
                   href="/"
@@ -101,43 +82,16 @@ export default function SuccessPage() {
                 Thanks — your payment has been received and your booking is confirmed.
               </p>
 
-              {state.warning ? (
-                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900 text-sm">
-                  {state.warning}
+              <div className="mt-6 rounded-xl border p-4 flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm text-gray-500">Booking reference</div>
+                  <div className="text-xl font-semibold">{bookingRef}</div>
                 </div>
-              ) : null}
-
-              <div className="mt-6 rounded-xl border p-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-sm text-gray-500">Booking reference</div>
-                    <div className="text-xl font-semibold">{state.bookingRef}</div>
-                  </div>
-                  {state.session?.amount_total != null ? (
-                    <div className="text-right">
-                      <div className="text-sm text-gray-500">Paid</div>
-                      <div className="text-xl font-semibold">
-                        £{(state.session.amount_total / 100).toFixed(2)}
-                      </div>
-                    </div>
-                  ) : null}
+                <div className="text-right">
+                  <div className="text-sm text-gray-500">Status</div>
+                  <div className="text-xl font-semibold">Paid</div>
                 </div>
-
-                {state.booking?.customer?.email ? (
-                  <div className="mt-3 text-sm text-gray-600">
-                    Confirmation sent to <span className="font-medium">{state.booking.customer.email}</span>
-                  </div>
-                ) : null}
               </div>
-
-              {state.booking?.booking ? (
-                <div className="mt-6 rounded-xl border p-4">
-                  <div className="font-semibold">Booking summary</div>
-                  <pre className="mt-3 text-xs bg-gray-50 p-3 rounded-lg overflow-auto">
-                    {JSON.stringify(state.booking.booking, null, 2)}
-                  </pre>
-                </div>
-              ) : null}
 
               <div className="mt-6 flex gap-3">
                 <Link
