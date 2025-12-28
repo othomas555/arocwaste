@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import Layout from "../components/layout";
@@ -32,6 +32,9 @@ function prettyTimeOption(key) {
 export default function ConfirmPage() {
   const router = useRouter();
   const q = router.query;
+
+  const [paying, setPaying] = useState(false);
+  const [payError, setPayError] = useState("");
 
   const data = useMemo(() => {
     return {
@@ -69,6 +72,33 @@ export default function ConfirmPage() {
     data.postcode &&
     data.address;
 
+  async function payNow() {
+    try {
+      setPayError("");
+      setPaying(true);
+
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json?.error || "Payment error");
+      }
+
+      if (!json?.url) {
+        throw new Error("Stripe did not return a checkout URL.");
+      }
+
+      window.location.href = json.url;
+    } catch (e) {
+      setPayError(e?.message || "Payment failed");
+      setPaying(false);
+    }
+  }
+
   return (
     <Layout>
       <div className="bg-[#f7f9ff]">
@@ -81,7 +111,7 @@ export default function ConfirmPage() {
               Confirm your booking
             </h1>
             <p className="mt-2 text-slate-600">
-              Check the details below. Payment is the next step (we’ll enable it once you’re happy).
+              Check the details below. Payment is the next step.
             </p>
           </div>
 
@@ -104,9 +134,7 @@ export default function ConfirmPage() {
 
                   <div>
                     <div className="text-slate-500">Time option</div>
-                    <div className="font-semibold text-slate-900">
-                      {prettyTimeOption(data.time)}
-                    </div>
+                    <div className="font-semibold text-slate-900">{prettyTimeOption(data.time)}</div>
                   </div>
 
                   <div>
@@ -171,8 +199,8 @@ export default function ConfirmPage() {
               <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
                 <h2 className="text-lg font-semibold text-slate-900">What happens next?</h2>
                 <ol className="mt-4 space-y-2 text-sm text-slate-700 list-decimal pl-5">
-                  <li>You’ll pay securely by card (Stripe) — we’ll enable this next.</li>
-                  <li>You’ll receive a confirmation email with your booking summary.</li>
+                  <li>You’ll pay securely by card (Stripe Checkout).</li>
+                  <li>You’ll see a payment success screen after checkout.</li>
                   <li>Our driver collects on your chosen date/time option.</li>
                 </ol>
               </div>
@@ -207,11 +235,23 @@ export default function ConfirmPage() {
 
                 <button
                   type="button"
-                  disabled
-                  className="mt-6 w-full rounded-2xl bg-slate-300 px-6 py-3 text-sm font-semibold text-white cursor-not-allowed"
+                  onClick={payNow}
+                  disabled={!hasBasics || paying}
+                  className={[
+                    "mt-6 w-full rounded-2xl px-6 py-3 text-sm font-semibold text-white",
+                    !hasBasics || paying
+                      ? "bg-slate-300 cursor-not-allowed"
+                      : "bg-indigo-600 hover:opacity-90",
+                  ].join(" ")}
                 >
-                  Pay now (coming next)
+                  {paying ? "Redirecting to Stripe..." : "Pay now"}
                 </button>
+
+                {payError && (
+                  <div className="mt-4 rounded-2xl bg-rose-50 p-4 text-sm text-rose-700">
+                    {payError}
+                  </div>
+                )}
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <button
@@ -231,7 +271,7 @@ export default function ConfirmPage() {
                 </div>
 
                 <p className="mt-4 text-xs text-slate-500">
-                  Tip: next step is enabling Stripe checkout so customers can pay by card.
+                  Payment is handled via Stripe Checkout (hosted by Stripe).
                 </p>
               </div>
             </div>
