@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { kv } from "@vercel/kv";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -16,7 +17,8 @@ export default async function handler(req, res) {
     });
   }
 
-  const stripe = new Stripe(secretKey);
+  // Use a fixed apiVersion for consistency
+  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
 
   try {
     const body = req.body || {};
@@ -75,6 +77,40 @@ export default async function handler(req, res) {
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/cancel`,
     });
+
+    // ✅ Save pending booking payload for finalize step (best effort)
+    // This allows /api/finalize-booking to create AROC-xxxxx + store the booking.
+    try {
+      await kv.set(
+        `booking:pending:${session.id}`,
+        {
+          customer: {
+            name: String(body.name ?? ""),
+            email: String(body.email ?? ""),
+            phone: String(body.phone ?? ""),
+            postcode: String(body.postcode ?? ""),
+            address: String(body.address ?? ""),
+          },
+          booking: {
+            title: String(body.title ?? ""),
+            base: Number(body.base ?? 0),
+            time: String(body.time ?? ""),
+            timeAdd: Number(body.timeAdd ?? 0),
+            remove: String(body.remove ?? ""),
+            removeAdd: Number(body.removeAdd ?? 0),
+            date: String(body.date ?? ""),
+            routeDay: String(body.routeDay ?? ""),
+            routeArea: String(body.routeArea ?? ""),
+            notes: String(body.notes ?? ""),
+            total: Number(body.total ?? 0),
+          },
+        },
+        { ex: 60 * 60 * 24 } // 24 hours
+      );
+    } catch (e) {
+      // If KV isn't configured yet, payments still work — we just can't store pending booking.
+      // No need to error.
+    }
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
