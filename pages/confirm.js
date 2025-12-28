@@ -37,20 +37,24 @@ export default function ConfirmPage() {
   const [payError, setPayError] = useState("");
 
   const data = useMemo(() => {
+    const base = Number(q.base ?? 0);
+    const qty = Math.max(1, Number(q.qty ?? 1));
+
     return {
       item: q.item || "",
       title: q.title || "",
-      base: q.base || 0,
+      base,
+      qty,
 
       date: q.date || "",
       routeDay: q.routeDay || "",
       routeArea: q.routeArea || "",
 
       time: q.time || "any",
-      timeAdd: q.timeAdd || 0,
+      timeAdd: Number(q.timeAdd ?? 0),
 
       remove: q.remove || "no",
-      removeAdd: q.removeAdd || 0,
+      removeAdd: Number(q.removeAdd ?? 0),
 
       name: q.name || "",
       email: q.email || "",
@@ -59,9 +63,11 @@ export default function ConfirmPage() {
       address: q.address || "",
       notes: q.notes || "",
 
-      total: q.total || 0,
+      total: Number(q.total ?? 0),
     };
   }, [q]);
+
+  const itemsSubtotal = data.base * data.qty;
 
   const hasBasics =
     data.title &&
@@ -116,7 +122,7 @@ export default function ConfirmPage() {
           </div>
 
           <div className="grid gap-6 lg:grid-cols-3">
-            {/* Left: details */}
+            {/* Left */}
             <div className="lg:col-span-2 space-y-6">
               <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
                 <h2 className="text-lg font-semibold text-slate-900">Collection details</h2>
@@ -124,17 +130,26 @@ export default function ConfirmPage() {
                 <div className="mt-4 grid gap-4 sm:grid-cols-2 text-sm">
                   <div>
                     <div className="text-slate-500">Service</div>
-                    <div className="font-semibold text-slate-900">{data.title || "—"}</div>
+                    <div className="font-semibold text-slate-900">
+                      {data.title} × {data.qty}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      £{data.base} each
+                    </div>
                   </div>
 
                   <div>
                     <div className="text-slate-500">Collection date</div>
-                    <div className="font-semibold text-slate-900">{formatISO(data.date)}</div>
+                    <div className="font-semibold text-slate-900">
+                      {formatISO(data.date)}
+                    </div>
                   </div>
 
                   <div>
                     <div className="text-slate-500">Time option</div>
-                    <div className="font-semibold text-slate-900">{prettyTimeOption(data.time)}</div>
+                    <div className="font-semibold text-slate-900">
+                      {prettyTimeOption(data.time)}
+                    </div>
                   </div>
 
                   <div>
@@ -170,66 +185,34 @@ export default function ConfirmPage() {
                   )}
                 </div>
               </div>
-
-              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">Customer details</h2>
-
-                <div className="mt-4 grid gap-4 sm:grid-cols-2 text-sm">
-                  <div>
-                    <div className="text-slate-500">Name</div>
-                    <div className="font-semibold text-slate-900">{data.name || "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-slate-500">Phone</div>
-                    <div className="font-semibold text-slate-900">{data.phone || "—"}</div>
-                  </div>
-                  <div className="sm:col-span-2">
-                    <div className="text-slate-500">Email</div>
-                    <div className="font-semibold text-slate-900">{data.email || "—"}</div>
-                  </div>
-                </div>
-
-                {!hasBasics && (
-                  <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">
-                    Some details look missing. Go back and complete the form before payment.
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">What happens next?</h2>
-                <ol className="mt-4 space-y-2 text-sm text-slate-700 list-decimal pl-5">
-                  <li>You’ll pay securely by card (Stripe Checkout).</li>
-                  <li>You’ll see a payment success screen after checkout.</li>
-                  <li>Our driver collects on your chosen date/time option.</li>
-                </ol>
-              </div>
             </div>
 
-            {/* Right: pricing summary */}
+            {/* Right */}
             <div className="space-y-6">
               <div className="sticky top-6 rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
                 <h2 className="text-lg font-semibold text-slate-900">Price summary</h2>
 
                 <div className="mt-4 space-y-3 text-sm">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="text-slate-600">Base price</div>
-                    <div className="font-semibold text-slate-900">{money(data.base)}</div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">
+                      Items ({data.qty} × £{data.base})
+                    </span>
+                    <span className="font-semibold">{money(itemsSubtotal)}</span>
                   </div>
 
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="text-slate-600">Time option</div>
-                    <div className="font-semibold text-slate-900">{money(data.timeAdd)}</div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Time option</span>
+                    <span className="font-semibold">{money(data.timeAdd)}</span>
                   </div>
 
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="text-slate-600">Remove from property</div>
-                    <div className="font-semibold text-slate-900">{money(data.removeAdd)}</div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Remove from property</span>
+                    <span className="font-semibold">{money(data.removeAdd)}</span>
                   </div>
 
-                  <div className="border-t border-slate-200 pt-3 flex items-start justify-between gap-4">
-                    <div className="font-extrabold text-slate-900">Total</div>
-                    <div className="font-extrabold text-slate-900">{money(data.total)}</div>
+                  <div className="border-t pt-3 flex justify-between">
+                    <span className="font-extrabold">Total</span>
+                    <span className="font-extrabold">{money(data.total)}</span>
                   </div>
                 </div>
 
@@ -252,37 +235,8 @@ export default function ConfirmPage() {
                     {payError}
                   </div>
                 )}
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => router.back()}
-                    className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold hover:border-slate-300"
-                  >
-                    Back
-                  </button>
-
-                  <Link
-                    href="/contact"
-                    className="inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
-                  >
-                    Need help?
-                  </Link>
-                </div>
-
-                <p className="mt-4 text-xs text-slate-500">
-                  Payment is handled via Stripe Checkout (hosted by Stripe).
-                </p>
               </div>
             </div>
-          </div>
-
-          <div className="mt-10 text-center text-sm text-slate-600">
-            Prefer to book by phone? Call{" "}
-            <a className="font-semibold text-indigo-600 hover:underline" href="tel:01656470040">
-              01656 470040
-            </a>
-            .
           </div>
         </div>
       </div>
