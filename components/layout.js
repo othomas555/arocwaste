@@ -1,4 +1,6 @@
 import Link from "next/link";
+import BasketButton from "./BasketButton";
+
 
 export default function Layout({ children }) {
   return (
@@ -40,6 +42,8 @@ export default function Layout({ children }) {
               >
                 <span className="text-slate-500">📞</span> 01656 470040
               </a>
+                  <BasketButton />
+
 
               <Link
                 href="/login"
