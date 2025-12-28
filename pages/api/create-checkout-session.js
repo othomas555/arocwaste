@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { getsupabaseAdmin } from "../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -27,6 +27,10 @@ export default async function handler(req, res) {
     const address = body.address;
     const date = body.date;
 
+    // ✅ Quantity (default 1)
+    const qtyRaw = Number(body.qty ?? 1);
+    const qty = Number.isInteger(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+
     const totalPounds = Number(body.total);
 
     if (!title || !email || !postcode || !address || !date) {
@@ -43,6 +47,9 @@ export default async function handler(req, res) {
       mode: "payment",
       payment_method_types: ["card"],
       customer_email: email,
+
+      // Keep 1 line-item that represents the whole booking total
+      // (we are already calculating total in the UI)
       line_items: [
         {
           quantity: 1,
@@ -50,14 +57,16 @@ export default async function handler(req, res) {
             currency: "gbp",
             unit_amount: totalPence,
             product_data: {
-              name: `AROC Waste – ${title}`,
+              name: `AROC Waste – ${title} (x${qty})`,
               description: `Collection on ${date}`,
             },
           },
         },
       ],
+
       metadata: {
         title: String(body.title ?? ""),
+        qty: String(qty),
         base: String(body.base ?? ""),
         time: String(body.time ?? ""),
         timeAdd: String(body.timeAdd ?? ""),
@@ -73,63 +82,67 @@ export default async function handler(req, res) {
         notes: String(body.notes ?? ""),
         total: String(body.total ?? ""),
       },
+
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/cancel`,
     });
 
     // ✅ Store pending booking in Supabase (best effort)
-// Never block checkout if Supabase isn't configured yet.
-try {
-  const supabaseAdmin = getSupabaseAdmin();
+    // Never block checkout if Supabase isn't configured yet.
+    try {
+      const supabaseAdmin = getSupabaseAdmin();
 
-  if (supabaseAdmin) {
-    const payload = {
-      title: String(body.title ?? ""),
-      base: Number(body.base ?? 0),
-      time: String(body.time ?? ""),
-      timeAdd: Number(body.timeAdd ?? 0),
-      remove: String(body.remove ?? ""),
-      removeAdd: Number(body.removeAdd ?? 0),
-      date: String(body.date ?? ""),
-      routeDay: String(body.routeDay ?? ""),
-      routeArea: String(body.routeArea ?? ""),
-      name: String(body.name ?? ""),
-      phone: String(body.phone ?? ""),
-      postcode: String(body.postcode ?? ""),
-      address: String(body.address ?? ""),
-      notes: String(body.notes ?? ""),
-      total: Number(body.total ?? 0),
-    };
-
-    const { error: upsertErr } = await supabaseAdmin
-      .from("bookings")
-      .upsert(
-        {
-          stripe_session_id: session.id,
-          payment_status: "pending",
+      if (supabaseAdmin) {
+        const payload = {
           title: String(body.title ?? ""),
-          collection_date: String(body.date ?? ""),
+          qty,
+          base: Number(body.base ?? 0),
+          time: String(body.time ?? ""),
+          timeAdd: Number(body.timeAdd ?? 0),
+          remove: String(body.remove ?? ""),
+          removeAdd: Number(body.removeAdd ?? 0),
+          date: String(body.date ?? ""),
+          routeDay: String(body.routeDay ?? ""),
+          routeArea: String(body.routeArea ?? ""),
           name: String(body.name ?? ""),
-          email: String(body.email ?? ""),
           phone: String(body.phone ?? ""),
           postcode: String(body.postcode ?? ""),
           address: String(body.address ?? ""),
           notes: String(body.notes ?? ""),
-          route_day: String(body.routeDay ?? ""),
-          route_area: String(body.routeArea ?? ""),
-          total_pence: totalPence,
-          payload,
-        },
-        { onConflict: "stripe_session_id" }
-      );
+          total: Number(body.total ?? 0),
+        };
 
-    if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
-  } else {
-    console.warn("Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save.");
-  }
-} catch (e) {
-  console.error("Supabase save failed:", e?.message || e);
-}
+        const { error: upsertErr } = await supabaseAdmin
+          .from("bookings")
+          .upsert(
+            {
+              stripe_session_id: session.id,
+              payment_status: "pending",
+              title: String(body.title ?? ""),
+              collection_date: String(body.date ?? ""),
+              name: String(body.name ?? ""),
+              email: String(body.email ?? ""),
+              phone: String(body.phone ?? ""),
+              postcode: String(body.postcode ?? ""),
+              address: String(body.address ?? ""),
+              notes: String(body.notes ?? ""),
+              route_day: String(body.routeDay ?? ""),
+              route_area: String(body.routeArea ?? ""),
+              total_pence: totalPence,
+              payload,
+            },
+            { onConflict: "stripe_session_id" }
+          );
+
+        if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
+      } else {
+        console.warn(
+          "Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save."
+        );
+      }
+    } catch (e) {
+      console.error("Supabase save failed:", e?.message || e);
+    }
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
