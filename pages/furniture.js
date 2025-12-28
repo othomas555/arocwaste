@@ -2,17 +2,7 @@ import Link from "next/link";
 import Layout from "../components/layout";
 import { furnitureItems } from "../data/furniture";
 
-function slugify(str) {
-  return String(str || "")
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}
-
 function Card({ item }) {
-  const id = slugify(item.title);
-
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm">
       <div className="h-40 bg-indigo-600 flex items-center justify-center">
@@ -29,24 +19,21 @@ function Card({ item }) {
         </h3>
 
         <div className="mt-2 text-indigo-600 font-semibold">
-          from £—
+          from £{Number(item.price).toFixed(2)}
         </div>
 
-        <p className="mt-3 text-sm text-slate-600">
-          {item.desc}
-        </p>
+        <p className="mt-3 text-sm text-slate-600">{item.desc}</p>
 
         <div className="mt-6 grid grid-cols-2 gap-3">
           <a
-            href={`#${id}`}
+            href={`#${item.id}`}
             className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold hover:border-slate-300"
           >
             More info
           </a>
 
-          {/* TEMP: until you have a real booking item list with ids/prices */}
           <Link
-            href="/contact"
+            href={`/book/furniture?item=${encodeURIComponent(item.id)}`}
             className="inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
           >
             Get started
@@ -74,14 +61,11 @@ export default function FurniturePage() {
           </div>
 
           <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((item) => {
-              const id = slugify(item.title);
-              return (
-                <div key={id} id={id}>
-                  <Card item={item} />
-                </div>
-              );
-            })}
+            {items.map((item) => (
+              <div key={item.id} id={item.id}>
+                <Card item={item} />
+              </div>
+            ))}
           </div>
 
           <div className="mt-12 rounded-3xl border border-slate-100 bg-white p-8 shadow-sm">
