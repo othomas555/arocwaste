@@ -1,27 +1,17 @@
 import Link from "next/link";
 import Layout from "../components/layout";
-import furniture from "../data/furniture";
+import { furnitureItems } from "../data/furniture";
 
-function normalizeItems(data) {
-  if (Array.isArray(data)) return data;
-  if (data && typeof data === "object") {
-    return Object.entries(data).map(([id, v]) => ({ id, ...v }));
-  }
-  return [];
-}
-
-function getTitle(item) {
-  return item.title || item.name || item.label || item.id;
-}
-
-function getPrice(item) {
-  const n = Number(item.price ?? item.basePrice ?? item.cost ?? 0);
-  return Number.isFinite(n) ? n : 0;
+function slugify(str) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
 }
 
 function Card({ item }) {
-  const title = getTitle(item);
-  const price = getPrice(item);
+  const id = slugify(item.title);
 
   return (
     <div className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm">
@@ -34,26 +24,29 @@ function Card({ item }) {
           FURNITURE
         </div>
 
-        <h3 className="mt-2 text-lg font-semibold text-slate-900">{title}</h3>
+        <h3 className="mt-2 text-lg font-semibold text-slate-900">
+          {item.title}
+        </h3>
 
         <div className="mt-2 text-indigo-600 font-semibold">
-          from £{price.toFixed(2)}
+          from £—
         </div>
 
         <p className="mt-3 text-sm text-slate-600">
-          Pick a date, choose time options, and add-ons if you need help moving it.
+          {item.desc}
         </p>
 
         <div className="mt-6 grid grid-cols-2 gap-3">
-          <Link
-            href={`/furniture#${item.id}`}
+          <a
+            href={`#${id}`}
             className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold hover:border-slate-300"
           >
             More info
-          </Link>
+          </a>
 
+          {/* TEMP: until you have a real booking item list with ids/prices */}
           <Link
-            href={`/book/furniture?item=${encodeURIComponent(item.id)}`}
+            href="/contact"
             className="inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
           >
             Get started
@@ -65,7 +58,7 @@ function Card({ item }) {
 }
 
 export default function FurniturePage() {
-  const items = normalizeItems(furniture);
+  const items = Array.isArray(furnitureItems) ? furnitureItems : [];
 
   return (
     <Layout>
@@ -81,11 +74,14 @@ export default function FurniturePage() {
           </div>
 
           <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((item) => (
-              <div key={item.id} id={item.id}>
-                <Card item={item} />
-              </div>
-            ))}
+            {items.map((item) => {
+              const id = slugify(item.title);
+              return (
+                <div key={id} id={id}>
+                  <Card item={item} />
+                </div>
+              );
+            })}
           </div>
 
           <div className="mt-12 rounded-3xl border border-slate-100 bg-white p-8 shadow-sm">
