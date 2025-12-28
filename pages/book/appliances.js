@@ -1,559 +1,681 @@
+// pages/book/appliances.js
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/router";
-
-import { findRouteForPostcode, nextServiceDatesForDay } from "../../utils/postcode";
+import Link from "next/link";
 import Layout from "../../components/layout";
-import appliances from "../../data/appliances";
+import { appliances, getApplianceBySlug } from "../../data/appliances";
 
-// ---- helpers ----
-function formatDateLabelFromISO(iso) {
-  // iso: YYYY-MM-DD
-  const [y, m, d] = iso.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString("en-GB", {
+/**
+ * NOTE:
+ * This page is built to match the Furniture booking flow pattern:
+ * - item from query string (?item=slug)
+ * - postcode -> route/day -> limited available dates
+ * - time add-ons
+ * - remove-from-property add-on
+ * - qty selector + running total
+ * - Continue -> /confirm with full details in query params
+ *
+ * If your /confirm page is currently furniture-only, tell me and I’ll paste a full updated /confirm file
+ * that supports both furniture and appliances.
+ */
+
+function formatGBP(amount) {
+  return new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+    minimumFractionDigits: 0,
+  }).format(amount);
+}
+
+function normalizePostcode(raw) {
+  return (raw || "")
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isValidPostcodeBasic(pc) {
+  // Not perfect validation; keeps UX friendly and avoids blocking legit inputs.
+  // Your Furniture flow likely has its own validation—swap this if needed.
+  return pc.length >= 5 && pc.length <= 8 && /[A-Z]/.test(pc) && /\d/.test(pc);
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function toISODate(date) {
+  // yyyy-mm-dd
+  const d = new Date(date);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function humanDate(iso) {
+  // e.g. Tue 14 Jan
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-GB", {
     weekday: "short",
     day: "2-digit",
     month: "short",
   });
 }
 
-function findApplianceById(id) {
-  if (!id) return null;
+function dayOfWeekName(dateObj) {
+  return dateObj.toLocaleDateString("en-GB", { weekday: "long" });
+}
 
-  // Support either:
-  // - array of items: [{ id, title/name, price }]
-  // - object map: { "upright-fridge-freezer": { ... } }
-  if (Array.isArray(appliances)) {
-    return appliances.find((x) => x.id === id) || null;
+/**
+ * Route/day logic (EDIT THIS to match your Furniture rules)
+ * We map postcode outward code prefix to a collection weekday.
+ *
+ * Example: CF32/CF33/CF34 etc. If not matched, default to "Thursday".
+ */
+const ROUTE_RULES = [
+  // Bridgend / Porthcawl / nearby examples
+  { prefixes: ["CF32"], day: 2 }, // Tue
+  { prefixes: ["CF33"], day: 3 }, // Wed
+  { prefixes: ["CF34"], day: 4 }, // Thu
+  { prefixes: ["CF35"], day: 5 }, // Fri
+  { prefixes: ["CF36"], day: 2 }, // Tue
+  { prefixes: ["CF31"], day: 3 }, // Wed
+  // Cardiff-ish examples (tune/remove as needed)
+  { prefixes: ["CF10", "CF11", "CF14", "CF15", "CF23", "CF24"], day: 4 }, // Thu
+];
+
+function getRouteDayFromPostcode(postcode) {
+  const pc = normalizePostcode(postcode);
+  const outward = pc.split(" ")[0]; // e.g. CF33
+  const match = ROUTE_RULES.find((r) => r.prefixes.includes(outward));
+  // JS getDay(): Sun 0..Sat 6
+  // We'll store day as 1..5 = Mon..Fri for simplicity.
+  return match ? match.day : 4; // default Thu (4)
+}
+
+function isWeekend(dateObj) {
+  const day = dateObj.getDay();
+  return day === 0 || day === 6;
+}
+
+function nextDatesForRoute(routeDayMonFri, count = 5, horizonDays = 28) {
+  // routeDayMonFri: Mon=1 ... Fri=5
+  // Return next `count` dates within horizon matching that weekday.
+  const today = new Date();
+  const results = [];
+  for (let i = 0; i <= horizonDays && results.length < count; i++) {
+    const d = addDays(today, i);
+    if (isWeekend(d)) continue;
+
+    const jsDay = d.getDay(); // Mon=1..Fri=5
+    if (jsDay === routeDayMonFri) {
+      results.push(toISODate(d));
+    }
   }
-
-  if (typeof appliances === "object" && appliances !== null) {
-    return appliances[id] ? { id, ...appliances[id] } : null;
-  }
-
-  return null;
+  return results;
 }
 
-function getTitle(item) {
-  return item.title || item.name || item.label || item.id;
-}
+const TIME_OPTIONS = [
+  { id: "any", label: "Any time", price: 0, note: "We’ll arrive at any time during the day." },
+  { id: "morning", label: "Morning", price: 10, note: "Arrive 8am–12pm." },
+  { id: "afternoon", label: "Afternoon", price: 10, note: "Arrive 12pm–5pm." },
+  { id: "twohour", label: "2-hour slot", price: 25, note: "We’ll contact you to confirm a 2-hour window." },
+];
 
-function getPrice(item) {
-  const p = item.price ?? item.basePrice ?? item.cost;
-  const n = Number(p);
-  return Number.isFinite(n) ? n : 0;
-}
+const REMOVE_FROM_PROPERTY_ADDON = {
+  id: "remove_from_property",
+  label: "Remove from property",
+  price: 20,
+  note: "We’ll collect from inside the property (ground floor).",
+};
 
-export default function BookAppliancePage() {
+export default function BookAppliancesPage() {
   const router = useRouter();
-  const { item: itemId } = router.query;
+  const { item: itemSlug } = router.query;
 
-  const item = useMemo(() => findApplianceById(itemId), [itemId]);
-  const basePrice = useMemo(() => (item ? getPrice(item) : 0), [item]);
-  const title = useMemo(() => (item ? getTitle(item) : ""), [item]);
+  const item = useMemo(() => {
+    if (!itemSlug || typeof itemSlug !== "string") return null;
+    return getApplianceBySlug(itemSlug);
+  }, [itemSlug]);
 
-  // form state
-  const [collectionDateISO, setCollectionDateISO] = useState("");
+  // If no item provided, we allow the user to choose on this page
+  const [selectedSlug, setSelectedSlug] = useState("");
+  useEffect(() => {
+    if (item?.slug) setSelectedSlug(item.slug);
+  }, [item?.slug]);
 
-  const [timeOption, setTimeOption] = useState("any"); // any | morning | afternoon | twohour
-  const [removeFromProperty, setRemoveFromProperty] = useState("no"); // no | yes
+  const selectedItem = useMemo(() => {
+    const slug = selectedSlug || (typeof itemSlug === "string" ? itemSlug : "");
+    return slug ? getApplianceBySlug(slug) : null;
+  }, [selectedSlug, itemSlug]);
 
-  const [fullName, setFullName] = useState("");
+  const [postcode, setPostcode] = useState("");
+  const [postcodeTouched, setPostcodeTouched] = useState(false);
+
+  const normalizedPostcode = useMemo(() => normalizePostcode(postcode), [postcode]);
+  const postcodeOk = useMemo(
+    () => isValidPostcodeBasic(normalizedPostcode),
+    [normalizedPostcode]
+  );
+
+  const routeDay = useMemo(() => {
+    if (!postcodeOk) return null;
+    return getRouteDayFromPostcode(normalizedPostcode);
+  }, [postcodeOk, normalizedPostcode]);
+
+  const availableDates = useMemo(() => {
+    if (!routeDay) return [];
+    return nextDatesForRoute(routeDay, 5, 35);
+  }, [routeDay]);
+
+  const [dateISO, setDateISO] = useState("");
+  useEffect(() => {
+    // auto-set first available date once we have available dates
+    if (!dateISO && availableDates.length > 0) setDateISO(availableDates[0]);
+  }, [availableDates, dateISO]);
+
+  const [timeOptionId, setTimeOptionId] = useState("any");
+  const timeOption = useMemo(
+    () => TIME_OPTIONS.find((t) => t.id === timeOptionId) || TIME_OPTIONS[0],
+    [timeOptionId]
+  );
+
+  const [removeFromProperty, setRemoveFromProperty] = useState(false);
+
+  const [qty, setQty] = useState(1);
+  useEffect(() => {
+    if (qty < 1) setQty(1);
+    if (qty > 20) setQty(20);
+  }, [qty]);
+
+  // Customer details (same as Furniture pattern)
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-  const [postcode, setPostcode] = useState("");
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
 
-  // postcode check state
-  const [postcodeChecked, setPostcodeChecked] = useState(false);
+  const baseTotal = useMemo(() => {
+    if (!selectedItem) return 0;
+    return selectedItem.price * qty;
+  }, [selectedItem, qty]);
 
-  const route = useMemo(() => {
-    if (!postcodeChecked) return null;
-    return findRouteForPostcode(postcode);
-  }, [postcode, postcodeChecked]);
+  const addonsTotal = useMemo(() => {
+    const time = timeOption?.price || 0;
+    const remove = removeFromProperty ? REMOVE_FROM_PROPERTY_ADDON.price : 0;
+    return time + remove;
+  }, [timeOption, removeFromProperty]);
 
-  const allowedDates = useMemo(() => {
-    if (!route) return [];
-    // returns ["YYYY-MM-DD", ...]
-    return nextServiceDatesForDay(route.day, 5);
-  }, [route]);
-
-  // default date = first allowed option after a successful postcode check
-  useEffect(() => {
-    if (!route) {
-      setCollectionDateISO("");
-      return;
-    }
-    if (!collectionDateISO && allowedDates.length > 0) {
-      setCollectionDateISO(allowedDates[0]);
-    }
-  }, [route, allowedDates, collectionDateISO]);
-
-  // If user changes postcode after checking, force re-check + reset date
-  useEffect(() => {
-    if (!postcodeChecked) return;
-    // if they edit the postcode field after checking, we reset check flag in onChange anyway.
-    // This effect is just here if you later change UI.
-  }, [postcodeChecked]);
-
-  const timeAddOn = useMemo(() => {
-    if (timeOption === "morning") return 10;
-    if (timeOption === "afternoon") return 10;
-    if (timeOption === "twohour") return 25;
-    return 0;
-  }, [timeOption]);
-
-  const removeAddOn = useMemo(() => {
-    return removeFromProperty === "yes" ? 20 : 0;
-  }, [removeFromProperty]);
-
-  const total = useMemo(() => {
-    return basePrice + timeAddOn + removeAddOn;
-  }, [basePrice, timeAddOn, removeAddOn]);
+  const total = useMemo(() => baseTotal + addonsTotal, [baseTotal, addonsTotal]);
 
   const canContinue = useMemo(() => {
-    if (!item) return false;
+    return (
+      !!selectedItem &&
+      postcodeOk &&
+      !!dateISO &&
+      !!name.trim() &&
+      !!email.trim() &&
+      !!phone.trim() &&
+      !!address.trim() &&
+      qty >= 1
+    );
+  }, [selectedItem, postcodeOk, dateISO, name, email, phone, address, qty]);
 
-    // must have checked postcode + be in area
-    if (!postcodeChecked) return false;
-    if (!route) return false;
+  function handleContinue() {
+    if (!canContinue) return;
 
-    // must pick a valid route date
-    if (!collectionDateISO) return false;
-    if (allowedDates.length > 0 && !allowedDates.includes(collectionDateISO)) return false;
-
-    // essentials
-    if (!fullName.trim()) return false;
-    if (!email.trim()) return false;
-    if (!phone.trim()) return false;
-    if (!postcode.trim()) return false;
-    if (!address.trim()) return false;
-
-    return true;
-  }, [
-    item,
-    postcodeChecked,
-    route,
-    collectionDateISO,
-    allowedDates,
-    fullName,
-    email,
-    phone,
-    postcode,
-    address,
-  ]);
-
-  function onContinue() {
-    if (!item) return;
-
-    if (!postcodeChecked) {
-      alert("Please check your postcode first.");
-      return;
+    // Build add-ons list (for confirm page + later Stripe/Supabase usage)
+    const addons = [];
+    if (timeOption && timeOption.price > 0) {
+      addons.push({ id: `time_${timeOption.id}`, label: timeOption.label, price: timeOption.price });
     }
-    if (!route) {
-      alert("Sorry — we don’t cover that postcode yet.");
-      return;
-    }
-    if (!collectionDateISO) {
-      alert("Please select a collection date.");
-      return;
-    }
-    if (allowedDates.length > 0 && !allowedDates.includes(collectionDateISO)) {
-      alert("Please select one of the available dates.");
-      return;
+    if (removeFromProperty) {
+      addons.push({
+        id: REMOVE_FROM_PROPERTY_ADDON.id,
+        label: REMOVE_FROM_PROPERTY_ADDON.label,
+        price: REMOVE_FROM_PROPERTY_ADDON.price,
+      });
     }
 
-    const params = new URLSearchParams();
-    params.set("item", item.id);
-    params.set("title", title);
-    params.set("base", String(basePrice));
+    // Pass everything through query params (same style as your Furniture flow likely does)
+    const query = {
+      category: "appliances",
+      item: selectedItem.slug,
+      title: selectedItem.title,
+      basePrice: String(selectedItem.price),
+      qty: String(qty),
+      postcode: normalizedPostcode,
+      routeDay: String(routeDay || ""),
+      date: dateISO,
+      time: timeOption.id,
+      timeLabel: timeOption.label,
+      timePrice: String(timeOption.price || 0),
+      remove: removeFromProperty ? "1" : "0",
+      removePrice: String(removeFromProperty ? REMOVE_FROM_PROPERTY_ADDON.price : 0),
+      name: name.trim(),
+      email: email.trim(),
+      phone: phone.trim(),
+      address: address.trim(),
+      notes: notes.trim(),
+      addons: encodeURIComponent(JSON.stringify(addons)),
+      total: String(total),
+    };
 
-    params.set("date", collectionDateISO);
-
-    // pass route info through
-    params.set("routeDay", route.day);
-    params.set("routeArea", route.area || "");
-
-    params.set("time", timeOption);
-    params.set("timeAdd", String(timeAddOn));
-
-    params.set("remove", removeFromProperty);
-    params.set("removeAdd", String(removeAddOn));
-
-    params.set("name", fullName);
-    params.set("email", email);
-    params.set("phone", phone);
-    params.set("postcode", postcode);
-    params.set("address", address);
-    params.set("notes", notes);
-
-    params.set("total", String(total));
-
-    router.push(`/confirm?${params.toString()}`);
+    router.push({ pathname: "/confirm", query });
   }
 
   return (
-    <Layout>
-      <div className="mx-auto max-w-5xl px-4 py-10">
-        {!item ? (
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <h1 className="text-2xl font-semibold">Appliance not found</h1>
-            <p className="mt-2 text-gray-600">
-              We couldn’t find that appliance. Please go back and choose an item to book.
-            </p>
-            <div className="mt-6">
-              <Link
-                href="/appliances"
-                className="inline-flex items-center justify-center rounded-xl bg-black px-5 py-3 text-white hover:opacity-90"
-              >
-                Back to appliances
+    <Layout
+      title="Book Appliance Collection | AROC Waste"
+      description="Choose your appliance item, confirm your date, add extras, and pay securely."
+    >
+      <div className="bg-white">
+        <div className="mx-auto max-w-6xl px-4 py-10 sm:py-12">
+          {/* Header */}
+          <div className="mb-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700">
+              <Link href="/appliances" className="text-slate-600 hover:text-slate-900">
+                Appliances
               </Link>
+              <span className="text-slate-300">•</span>
+              <span>Booking</span>
+            </div>
+
+            <h1 className="mt-4 text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
+              Let’s get your appliance collected.
+            </h1>
+            <p className="mt-2 text-slate-600">
+              Choose the item, confirm your collection day for your postcode, then pay securely online.
+            </p>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-12">
+            {/* Left: form */}
+            <div className="lg:col-span-7">
+              {/* Item picker */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">1) Choose item</div>
+                <p className="mt-1 text-sm text-slate-600">
+                  Pick the closest match — you can add details in notes.
+                </p>
+
+                <div className="mt-4">
+                  <label className="block text-xs font-medium text-slate-700">
+                    Appliance item
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                    value={selectedSlug}
+                    onChange={(e) => setSelectedSlug(e.target.value)}
+                  >
+                    <option value="">Select an item…</option>
+                    {appliances.map((a) => (
+                      <option key={a.slug} value={a.slug}>
+                        {a.title} — {formatGBP(a.price)}
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedItem && (
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                      <div className="font-semibold text-slate-900">{selectedItem.title}</div>
+                      <div className="text-slate-600">{selectedItem.subtitle}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Postcode + date */}
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">2) Postcode & collection date</div>
+                <p className="mt-1 text-sm text-slate-600">
+                  We’ll show the next available collection dates for your area.
+                </p>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Postcode</label>
+                    <input
+                      value={postcode}
+                      onChange={(e) => setPostcode(e.target.value)}
+                      onBlur={() => setPostcodeTouched(true)}
+                      placeholder="e.g. CF33 4AA"
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                    />
+                    {postcodeTouched && !postcodeOk && (
+                      <p className="mt-2 text-xs text-rose-600">
+                        Please enter a valid postcode.
+                      </p>
+                    )}
+                    {postcodeOk && routeDay && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        Your collection day is <span className="font-semibold text-slate-700">{dayOfWeekName(
+                          new Date(availableDates[0] + "T00:00:00")
+                        )}</span>.
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Collection date</label>
+                    <select
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                      value={dateISO}
+                      onChange={(e) => setDateISO(e.target.value)}
+                      disabled={!postcodeOk || availableDates.length === 0}
+                    >
+                      {availableDates.length === 0 ? (
+                        <option value="">Enter postcode to see dates</option>
+                      ) : (
+                        availableDates.map((d) => (
+                          <option key={d} value={d}>
+                            {humanDate(d)}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <p className="mt-2 text-xs text-slate-500">
+                      We offer the next 5 available dates for your route.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Add-ons */}
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">3) Options</div>
+                <p className="mt-1 text-sm text-slate-600">
+                  Add timed arrival or removal-from-property if needed.
+                </p>
+
+                <div className="mt-4">
+                  <div className="text-xs font-medium text-slate-700">Time option</div>
+                  <div className="mt-2 grid gap-3">
+                    {TIME_OPTIONS.map((t) => (
+                      <label
+                        key={t.id}
+                        className="flex cursor-pointer items-start justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-4 hover:border-slate-300"
+                      >
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="radio"
+                            name="timeOption"
+                            value={t.id}
+                            checked={timeOptionId === t.id}
+                            onChange={() => setTimeOptionId(t.id)}
+                            className="mt-1"
+                          />
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">
+                              {t.label}{" "}
+                              {t.price > 0 && (
+                                <span className="ml-2 text-sm font-semibold text-slate-700">
+                                  +{formatGBP(t.price)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-600">{t.note}</div>
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-5">
+                  <label className="flex cursor-pointer items-start justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-4 hover:border-slate-300">
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={removeFromProperty}
+                        onChange={(e) => setRemoveFromProperty(e.target.checked)}
+                        className="mt-1"
+                      />
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">
+                          {REMOVE_FROM_PROPERTY_ADDON.label}{" "}
+                          <span className="ml-2 text-sm font-semibold text-slate-700">
+                            +{formatGBP(REMOVE_FROM_PROPERTY_ADDON.price)}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-xs text-slate-600">
+                          {REMOVE_FROM_PROPERTY_ADDON.note}
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Quantity */}
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">4) Quantity</div>
+                <p className="mt-1 text-sm text-slate-600">
+                  Increase quantity for multiple items of the same type.
+                </p>
+
+                <div className="mt-4 flex items-center gap-3">
+                  <button
+                    type="button"
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-900 shadow-sm hover:bg-slate-50"
+                    onClick={() => setQty((q) => Math.max(1, q - 1))}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={qty}
+                    onChange={(e) => setQty(Number(e.target.value || 1))}
+                    className="h-10 w-20 rounded-xl border border-slate-200 bg-white px-3 text-center text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-900 shadow-sm hover:bg-slate-50"
+                    onClick={() => setQty((q) => Math.min(20, q + 1))}
+                  >
+                    +
+                  </button>
+
+                  <div className="text-sm text-slate-600">
+                    {selectedItem ? (
+                      <>
+                        {formatGBP(selectedItem.price)} per item
+                      </>
+                    ) : (
+                      <>Select an item to see price</>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Details */}
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">5) Your details</div>
+                <p className="mt-1 text-sm text-slate-600">
+                  Used for confirmation and driver instructions.
+                </p>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Name</label>
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Email</label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Phone</label>
+                    <input
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700">Postcode</label>
+                    <input
+                      value={normalizedPostcode}
+                      readOnly
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 shadow-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <label className="block text-xs font-medium text-slate-700">Address</label>
+                  <input
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="House number + street + town"
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </div>
+
+                <div className="mt-4">
+                  <label className="block text-xs font-medium text-slate-700">Notes (optional)</label>
+                  <textarea
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    rows={4}
+                    placeholder="Access notes, stairs, parking instructions, etc."
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Continue */}
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+                <button
+                  type="button"
+                  onClick={handleContinue}
+                  disabled={!canContinue}
+                  className={`inline-flex items-center justify-center rounded-xl px-5 py-3 text-sm font-semibold shadow-sm transition ${
+                    canContinue
+                      ? "bg-slate-900 text-white hover:bg-slate-800"
+                      : "bg-slate-200 text-slate-500 cursor-not-allowed"
+                  }`}
+                >
+                  Continue →
+                </button>
+
+                <Link
+                  href="/appliances"
+                  className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50"
+                >
+                  Back to appliances
+                </Link>
+
+                {!canContinue && (
+                  <p className="text-xs text-slate-500">
+                    Complete item, postcode/date, quantity and contact details to continue.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Right: summary */}
+            <div className="lg:col-span-5">
+              <div className="sticky top-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="text-sm font-semibold text-slate-900">Booking summary</div>
+
+                <div className="mt-4 space-y-3 text-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Item</div>
+                    <div className="text-right font-semibold text-slate-900">
+                      {selectedItem ? selectedItem.title : "Select an item"}
+                    </div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Quantity</div>
+                    <div className="text-right font-semibold text-slate-900">{qty}</div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="text-slate-600">Base</div>
+                    <div className="text-right font-semibold text-slate-900">
+                      {formatGBP(baseTotal)}
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-200 pt-3">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                      Add-ons
+                    </div>
+
+                    <div className="mt-2 space-y-2">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="text-slate-600">{timeOption.label}</div>
+                        <div className="font-semibold text-slate-900">
+                          {timeOption.price > 0 ? `+${formatGBP(timeOption.price)}` : formatGBP(0)}
+                        </div>
+                      </div>
+
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="text-slate-600">Remove from property</div>
+                        <div className="font-semibold text-slate-900">
+                          {removeFromProperty
+                            ? `+${formatGBP(REMOVE_FROM_PROPERTY_ADDON.price)}`
+                            : formatGBP(0)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-200 pt-3">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="text-slate-700 font-semibold">Total</div>
+                      <div className="text-right text-lg font-semibold text-slate-900">
+                        {formatGBP(total)}
+                      </div>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Secure card payment at checkout.
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                    {postcodeOk && availableDates.length > 0 ? (
+                      <>
+                        Route day:{" "}
+                        <span className="font-semibold text-slate-700">
+                          {dayOfWeekName(new Date(availableDates[0] + "T00:00:00"))}
+                        </span>{" "}
+                        • Selected date:{" "}
+                        <span className="font-semibold text-slate-700">
+                          {dateISO ? humanDate(dateISO) : "—"}
+                        </span>
+                      </>
+                    ) : (
+                      <>Enter your postcode to see available dates.</>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        ) : (
-          <>
-            <div className="mb-6">
-              <Link href="/appliances" className="text-sm text-gray-600 hover:underline">
-                ← Back to appliances
-              </Link>
-              <h1 className="mt-2 text-3xl font-semibold">Let’s get started</h1>
-              <p className="mt-1 text-gray-600">
-                Booking for: <span className="font-medium text-gray-900">{title}</span>
-              </p>
-            </div>
 
-            <div className="grid gap-6 lg:grid-cols-3">
-              {/* Left: form */}
-              <div className="lg:col-span-2 space-y-6">
-                {/* NEW: Postcode check */}
-                <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">1) Check your area</h2>
-                  <p className="mt-1 text-gray-600">
-                    Enter your postcode to see what day we’re in your area.
-                  </p>
-
-                  <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-                    <div className="flex-1">
-                      <label className="text-sm font-medium text-gray-700">Postcode</label>
-                      <input
-                        value={postcode}
-                        onChange={(e) => {
-                          setPostcode(e.target.value);
-                          setPostcodeChecked(false);
-                          setCollectionDateISO("");
-                        }}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 uppercase outline-none focus:border-black"
-                        placeholder="e.g. NP20 1AB"
-                      />
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setPostcodeChecked(true)}
-                      className="inline-flex items-center justify-center rounded-xl bg-black px-5 py-3 text-white hover:opacity-90"
-                    >
-                      Check postcode
-                    </button>
-                  </div>
-
-                  {postcodeChecked && !route && (
-                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
-                      Sorry — we don’t cover that postcode yet.
-                    </div>
-                  )}
-
-                  {postcodeChecked && route && (
-                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
-                      ✅ We cover <span className="font-medium">{route.area || "your area"}</span>. We’re in
-                      your area on <span className="font-medium">{route.day}</span>.
-                    </div>
-                  )}
-                </div>
-
-                {/* Step 2: date selection now depends on route */}
-                <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">2) Choose a collection date</h2>
-                  <p className="mt-1 text-gray-600">
-                    {route ? `Next 5 available ${route.day}s` : "Check your postcode first to see available dates."}
-                  </p>
-
-                  {!route ? (
-                    <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
-                      Enter and check your postcode above to unlock dates.
-                    </div>
-                  ) : (
-                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                      {allowedDates.map((iso) => {
-                        const isSelected = collectionDateISO === iso;
-                        return (
-                          <button
-                            key={iso}
-                            type="button"
-                            onClick={() => setCollectionDateISO(iso)}
-                            className={[
-                              "rounded-xl border p-4 text-left transition",
-                              isSelected
-                                ? "border-black bg-gray-50"
-                                : "border-gray-200 bg-white hover:bg-gray-50",
-                            ].join(" ")}
-                          >
-                            <div className="text-sm text-gray-500">{iso}</div>
-                            <div className="mt-1 text-base font-medium">{formatDateLabelFromISO(iso)}</div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {/* Step 3 */}
-                <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">3) Choose a time option</h2>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <button
-                      type="button"
-                      onClick={() => setTimeOption("any")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        timeOption === "any"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">Any time</div>
-                      <div className="mt-1 text-sm text-gray-600">£0</div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setTimeOption("morning")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        timeOption === "morning"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">Morning</div>
-                      <div className="mt-1 text-sm text-gray-600">+£10</div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setTimeOption("afternoon")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        timeOption === "afternoon"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">Afternoon</div>
-                      <div className="mt-1 text-sm text-gray-600">+£10</div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setTimeOption("twohour")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        timeOption === "twohour"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">2-hour slot</div>
-                      <div className="mt-1 text-sm text-gray-600">+£25</div>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Step 4 */}
-                <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">4) Remove from property?</h2>
-                  <p className="mt-1 text-gray-600">If the item isn’t outside ready for collection.</p>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <button
-                      type="button"
-                      onClick={() => setRemoveFromProperty("no")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        removeFromProperty === "no"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">No</div>
-                      <div className="mt-1 text-sm text-gray-600">£0</div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setRemoveFromProperty("yes")}
-                      className={[
-                        "rounded-xl border p-4 text-left transition",
-                        removeFromProperty === "yes"
-                          ? "border-black bg-gray-50"
-                          : "border-gray-200 bg-white hover:bg-gray-50",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium">Yes</div>
-                      <div className="mt-1 text-sm text-gray-600">+£20</div>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Step 5 */}
-                <div className="rounded-2xl border bg-white p-6 shadow-sm">
-                  <h2 className="text-xl font-semibold">5) Your details</h2>
-
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="text-sm font-medium text-gray-700">Full name</label>
-                      <input
-                        value={fullName}
-                        onChange={(e) => setFullName(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none focus:border-black"
-                        placeholder="Your name"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-medium text-gray-700">Email</label>
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none focus:border-black"
-                        placeholder="you@example.com"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-medium text-gray-700">Phone</label>
-                      <input
-                        value={phone}
-                        onChange={(e) => setPhone(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none focus:border-black"
-                        placeholder="07..."
-                      />
-                    </div>
-
-                    {/* postcode field removed from here (it’s in step 1 now) */}
-
-                    <div className="sm:col-span-2">
-                      <label className="text-sm font-medium text-gray-700">Address</label>
-                      <input
-                        value={address}
-                        onChange={(e) => setAddress(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none focus:border-black"
-                        placeholder="House number, street, town"
-                      />
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <label className="text-sm font-medium text-gray-700">Notes (optional)</label>
-                      <textarea
-                        value={notes}
-                        onChange={(e) => setNotes(e.target.value)}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none focus:border-black"
-                        placeholder="Anything we should know? (access, stairs, parking, etc.)"
-                        rows={4}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <p className="text-sm text-gray-600">
-                      By continuing you’re confirming the details are correct (payment not enabled yet).
-                    </p>
-
-                    <button
-                      type="button"
-                      onClick={onContinue}
-                      disabled={!canContinue}
-                      className={[
-                        "inline-flex items-center justify-center rounded-xl px-5 py-3 text-white transition",
-                        canContinue ? "bg-black hover:opacity-90" : "bg-gray-300 cursor-not-allowed",
-                      ].join(" ")}
-                    >
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right: summary */}
-              <div className="space-y-6">
-                <div className="sticky top-6 rounded-2xl border bg-white p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold">Summary</h3>
-
-                  <div className="mt-4 space-y-3 text-sm">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="text-gray-700">{title}</div>
-                      <div className="font-medium">£{basePrice}</div>
-                    </div>
-
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="text-gray-700">
-                        Time option{" "}
-                        <span className="text-gray-500">
-                          (
-                          {timeOption === "any"
-                            ? "Any"
-                            : timeOption === "morning"
-                            ? "Morning"
-                            : timeOption === "afternoon"
-                            ? "Afternoon"
-                            : "2-hour"}
-                          )
-                        </span>
-                      </div>
-                      <div className="font-medium">£{timeAddOn}</div>
-                    </div>
-
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="text-gray-700">
-                        Remove from property{" "}
-                        <span className="text-gray-500">
-                          ({removeFromProperty === "yes" ? "Yes" : "No"})
-                        </span>
-                      </div>
-                      <div className="font-medium">£{removeAddOn}</div>
-                    </div>
-
-                    <div className="border-t pt-3 flex items-start justify-between gap-4">
-                      <div className="text-gray-900 font-semibold">Total</div>
-                      <div className="text-gray-900 font-semibold">£{total}</div>
-                    </div>
-
-                    <div className="pt-2 text-gray-600">
-                      Collection date:{" "}
-                      <span className="font-medium text-gray-900">{collectionDateISO || "—"}</span>
-                    </div>
-
-                    <div className="pt-1 text-gray-600">
-                      Route day:{" "}
-                      <span className="font-medium text-gray-900">
-                        {postcodeChecked ? (route ? route.day : "Out of area") : "—"}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="mt-5 rounded-xl bg-gray-50 p-4 text-sm text-gray-600">
-                    <p className="font-medium text-gray-900">No payment yet</p>
-                    <p className="mt-1">
-                      This is a placeholder flow so you can see booking → confirmation working end-to-end.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+          {/* Small footer note */}
+          <div className="mt-10 text-xs text-slate-500">
+            Items must be ready for collection. If an item is exceptionally heavy or access is difficult,
+            please add details in notes.
+          </div>
+        </div>
       </div>
     </Layout>
   );
