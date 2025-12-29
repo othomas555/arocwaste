@@ -14,7 +14,6 @@ function isStripePriceId(v) {
 }
 
 function pickPrices(frequency) {
-  // frequency: "weekly" | "fortnightly" | "threeweekly"
   const map = {
     weekly: {
       bin: process.env.STRIPE_PRICE_BIN_WEEKLY,
@@ -29,7 +28,6 @@ function pickPrices(frequency) {
       bag: process.env.STRIPE_PRICE_BAG_THREEWEEKLY,
     },
   };
-
   return map[frequency] || null;
 }
 
@@ -66,7 +64,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Missing or invalid STRIPE_SECRET_KEY" });
   }
 
-  // ✅ Make missing/invalid env vars explicit (helps instantly on Vercel)
   const envCheck = validateEnvForPrices();
   if (envCheck.missing.length || envCheck.invalid.length) {
     return res.status(500).json({
@@ -74,7 +71,7 @@ export default async function handler(req, res) {
       missing: envCheck.missing,
       invalid: envCheck.invalid,
       hint:
-        "Check Vercel Environment Variables are set for the environment you are testing (Production vs Preview), and values start with price_. Redeploy after changes.",
+        "Check Vercel env vars for this environment (Production vs Preview). Values must start with price_. Redeploy after changes.",
     });
   }
 
@@ -107,29 +104,23 @@ export default async function handler(req, res) {
     if (!prices?.bin || !prices?.bag) {
       return res.status(500).json({
         error: `Stripe Price IDs not mapped for frequency="${frequency}"`,
-        debug: {
-          frequency,
-          bin: prices?.bin || null,
-          bag: prices?.bag || null,
-        },
+        debug: { frequency, bin: prices?.bin || null, bag: prices?.bag || null },
       });
     }
 
     const depositPriceId = process.env.STRIPE_PRICE_BIN_DEPOSIT;
-
     const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
 
-    // Build subscription line items
+    // ✅ Build Checkout line items
+    // Stripe supports MIXING recurring + one-time line items in subscription mode.
     const line_items = [{ price: prices.bin, quantity: 1 }];
 
-    if (extraBags > 0) {
-      line_items.push({ price: prices.bag, quantity: extraBags });
-    }
+    if (extraBags > 0) line_items.push({ price: prices.bag, quantity: extraBags });
 
-    // One-time deposit (if NOT using own bin)
-    const subscription_data = {};
-    if (!useOwnBin) {
-      subscription_data.add_invoice_items = [{ price: depositPriceId, quantity: 1 }];
+    // ✅ Deposit as one-time line item (only if NOT using own bin)
+    const depositApplied = !useOwnBin;
+    if (depositApplied) {
+      line_items.push({ price: depositPriceId, quantity: 1 });
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -137,13 +128,13 @@ export default async function handler(req, res) {
       payment_method_types: ["card"],
       customer_email: email,
       line_items,
-      subscription_data,
 
       metadata: {
         mode: "bins_subscription",
         frequency,
         extraBags: String(extraBags),
         useOwnBin: useOwnBin ? "yes" : "no",
+        depositApplied: depositApplied ? "yes" : "no",
         routeDay,
         routeArea,
         name,
@@ -156,7 +147,7 @@ export default async function handler(req, res) {
       cancel_url: `${origin}/bins-bags`,
     });
 
-    // Save a pending row (best-effort)
+    // Save pending row (best effort)
     try {
       const supabaseAdmin = getSupabaseAdmin();
       if (supabaseAdmin) {
@@ -178,6 +169,7 @@ export default async function handler(req, res) {
               frequency,
               extraBags,
               useOwnBin,
+              depositApplied,
               routeDay,
               routeArea,
             },
