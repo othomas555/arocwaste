@@ -23,10 +23,11 @@ function addDays(date, days) {
 export default function OpsRoutes() {
   const thisMonday = useMemo(() => startOfISOWeekMonday(new Date()), []);
   const [weekStart, setWeekStart] = useState(toISODate(thisMonday));
-  const [frequency, setFrequency] = useState("all"); // all | weekly | fortnightly | three-weekly
+  const [frequency, setFrequency] = useState("all");
   const [dueOnly, setDueOnly] = useState(true);
   const [postcode, setPostcode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [markingId, setMarkingId] = useState(null);
   const [rows, setRows] = useState([]);
   const [error, setError] = useState("");
 
@@ -52,6 +53,42 @@ export default function OpsRoutes() {
       setError(e.message || "Something went wrong");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function markCollected(subscriptionId) {
+    setMarkingId(subscriptionId);
+    setError("");
+
+    try {
+      const res = await fetch("/api/ops/mark-collected", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subscriptionId,
+          // collectedDate optional — leaving blank uses DB current_date
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to mark collected");
+
+      // Update row locally (no full reload needed)
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === subscriptionId
+            ? {
+                ...r,
+                next_collection_date: data.next_collection_date || r.next_collection_date,
+                is_due: false,
+              }
+            : r
+        )
+      );
+    } catch (e) {
+      setError(e.message || "Something went wrong");
+    } finally {
+      setMarkingId(null);
     }
   }
 
@@ -148,12 +185,14 @@ export default function OpsRoutes() {
               <thead className="bg-gray-50 text-xs font-semibold text-gray-700">
                 <tr>
                   <th className="px-4 py-3">Due</th>
+                  <th className="px-4 py-3">Area</th>
                   <th className="px-4 py-3">Customer</th>
                   <th className="px-4 py-3">Postcode</th>
                   <th className="px-4 py-3">Address</th>
                   <th className="px-4 py-3">Frequency</th>
                   <th className="px-4 py-3">Extra bags</th>
-                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Next</th>
+                  <th className="px-4 py-3">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -170,18 +209,29 @@ export default function OpsRoutes() {
                         </span>
                       )}
                     </td>
+                    <td className="px-4 py-3">{r.route_area || "—"}</td>
                     <td className="px-4 py-3 font-medium text-gray-900">{r.customer_name || "—"}</td>
                     <td className="px-4 py-3">{r.postcode || "—"}</td>
                     <td className="px-4 py-3">{r.address || "—"}</td>
                     <td className="px-4 py-3">{r.frequency || "—"}</td>
                     <td className="px-4 py-3">{Number.isFinite(r.extra_bags) ? r.extra_bags : "—"}</td>
-                    <td className="px-4 py-3">{r.status || "—"}</td>
+                    <td className="px-4 py-3">{r.next_collection_date || "—"}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => markCollected(r.id)}
+                        disabled={!r.is_due || markingId === r.id}
+                        className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-100 disabled:opacity-50"
+                        title={!r.is_due ? "Only available for due stops" : "Mark collected"}
+                      >
+                        {markingId === r.id ? "Saving..." : "Mark collected"}
+                      </button>
+                    </td>
                   </tr>
                 ))}
 
                 {rows.length === 0 ? (
                   <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-600" colSpan={7}>
+                    <td className="px-4 py-6 text-center text-sm text-gray-600" colSpan={9}>
                       No rows loaded yet. Click <span className="font-semibold">Load list</span>.
                     </td>
                   </tr>
@@ -192,8 +242,7 @@ export default function OpsRoutes() {
         </div>
 
         <div className="mt-6 text-xs text-gray-500">
-          Security note: this page doesn’t implement login yet. Access is controlled server-side by an
-          env key in the API route.
+          Next step: add a “Collected date” picker + undo, and a “Due today” view.
         </div>
       </div>
     </main>
