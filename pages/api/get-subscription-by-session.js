@@ -1,5 +1,11 @@
 import Stripe from "stripe";
 import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
+import {
+  getResend,
+  getResendFrom,
+  buildCustomerSubscriptionEmail,
+  buildAdminSubscriptionEmail,
+} from "../../lib/subscriptionEmails";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
@@ -14,6 +20,55 @@ function mapStripeSubStatus(status) {
 function toDateOnlyFromUnix(unixSeconds) {
   if (!unixSeconds) return null;
   return new Date(unixSeconds * 1000).toISOString().slice(0, 10);
+}
+
+async function sendSubscriptionEmailsOnce({ supabaseAdmin, subRow }) {
+  if (!subRow) return;
+
+  const resend = getResend();
+  if (!resend) {
+    console.warn("RESEND_API_KEY missing; skipping subscription emails.");
+    return;
+  }
+
+  const from = getResendFrom();
+  const adminTo = process.env.AROC_ADMIN_EMAIL || "";
+
+  // Customer email (once)
+  if (!subRow.customer_email_sent_at && subRow.email) {
+    const customerEmail = buildCustomerSubscriptionEmail(subRow);
+
+    await resend.emails.send({
+      from: `AROC Waste <${from}>`,
+      to: subRow.email,
+      subject: customerEmail.subject,
+      html: customerEmail.html,
+      text: customerEmail.text,
+    });
+
+    await supabaseAdmin
+      .from("subscriptions")
+      .update({ customer_email_sent_at: new Date().toISOString() })
+      .eq("id", subRow.id);
+  }
+
+  // Admin email (once)
+  if (!subRow.admin_email_sent_at && adminTo) {
+    const adminEmail = buildAdminSubscriptionEmail(subRow);
+
+    await resend.emails.send({
+      from: `AROC Waste <${from}>`,
+      to: adminTo,
+      subject: adminEmail.subject,
+      html: adminEmail.html,
+      text: adminEmail.text,
+    });
+
+    await supabaseAdmin
+      .from("subscriptions")
+      .update({ admin_email_sent_at: new Date().toISOString() })
+      .eq("id", subRow.id);
+  }
 }
 
 export default async function handler(req, res) {
@@ -63,7 +118,6 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (existing) {
-      // Update without wiping existing fields
       const { error: updErr } = await supabaseAdmin
         .from("subscriptions")
         .update({
@@ -77,7 +131,6 @@ export default async function handler(req, res) {
 
       if (updErr) throw new Error(updErr.message);
     } else {
-      // 2) If missing, INSERT a full row from metadata/session
       const insertRow = {
         stripe_checkout_session_id: session_id,
         stripe_customer_id: customerId,
@@ -85,11 +138,7 @@ export default async function handler(req, res) {
         status,
 
         name: md.name || null,
-        email:
-          session.customer_details?.email ||
-          session.customer_email ||
-          md.email ||
-          null,
+        email: session.customer_details?.email || session.customer_email || md.email || null,
         phone: md.phone || null,
 
         postcode: md.postcode || null,
@@ -112,7 +161,7 @@ export default async function handler(req, res) {
       if (insErr) throw new Error(insErr.message);
     }
 
-    // 3) Return best record (prefer by subscription id)
+    // 2) Fetch the saved row (prefer by subscription id)
     let subRow = null;
 
     if (subscriptionId) {
@@ -132,6 +181,9 @@ export default async function handler(req, res) {
         .maybeSingle();
       subRow = data || null;
     }
+
+    // ✅ Email fallback here (ensures you get emails even if webhook isn’t firing)
+    await sendSubscriptionEmailsOnce({ supabaseAdmin, subRow });
 
     return res.status(200).json({ ok: true, subscription: subRow });
   } catch (err) {
