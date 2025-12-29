@@ -27,16 +27,14 @@ export default async function handler(req, res) {
   if (!session_id) return res.status(400).json({ error: "Missing session_id" });
 
   const supabaseAdmin = getSupabaseAdmin();
-  if (!supabaseAdmin) {
-    return res.status(500).json({ error: "Supabase not configured" });
-  }
+  if (!supabaseAdmin) return res.status(500).json({ error: "Supabase not configured" });
 
   const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
 
   try {
     const session = await stripe.checkout.sessions.retrieve(session_id);
-    if (!session) return res.status(404).json({ error: "Stripe session not found" });
 
+    if (!session) return res.status(404).json({ error: "Stripe session not found" });
     if (session.mode !== "subscription") {
       return res.status(400).json({ error: "This session is not a subscription checkout." });
     }
@@ -55,22 +53,66 @@ export default async function handler(req, res) {
       next_collection_date = toDateOnlyFromUnix(sub.current_period_end);
     }
 
-    // Update the row we created pre-checkout (best effort)
-    await supabaseAdmin
+    const md = session.metadata || {};
+
+    // 1) Try to find existing row by checkout session id
+    const { data: existing } = await supabaseAdmin
       .from("subscriptions")
-      .upsert(
-        {
-          stripe_checkout_session_id: session_id,
+      .select("*")
+      .eq("stripe_checkout_session_id", session_id)
+      .maybeSingle();
+
+    if (existing) {
+      // Update without wiping existing fields
+      const { error: updErr } = await supabaseAdmin
+        .from("subscriptions")
+        .update({
           stripe_customer_id: customerId,
           stripe_subscription_id: subscriptionId,
           status,
           start_date,
           next_collection_date,
-        },
-        { onConflict: "stripe_checkout_session_id" }
-      );
+        })
+        .eq("stripe_checkout_session_id", session_id);
 
-    // Return full record (prefer by subscription_id if present)
+      if (updErr) throw new Error(updErr.message);
+    } else {
+      // 2) If missing, INSERT a full row from metadata/session
+      const insertRow = {
+        stripe_checkout_session_id: session_id,
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscriptionId,
+        status,
+
+        name: md.name || null,
+        email:
+          session.customer_details?.email ||
+          session.customer_email ||
+          md.email ||
+          null,
+        phone: md.phone || null,
+
+        postcode: md.postcode || null,
+        address: md.address || null,
+
+        frequency: md.frequency || "weekly",
+        extra_bags: Number(md.extraBags ?? 0),
+        use_own_bin: md.useOwnBin === "yes",
+
+        route_day: md.routeDay || null,
+        route_area: md.routeArea || null,
+
+        start_date,
+        next_collection_date,
+
+        payload: md || null,
+      };
+
+      const { error: insErr } = await supabaseAdmin.from("subscriptions").insert(insertRow);
+      if (insErr) throw new Error(insErr.message);
+    }
+
+    // 3) Return best record (prefer by subscription id)
     let subRow = null;
 
     if (subscriptionId) {
@@ -80,7 +122,9 @@ export default async function handler(req, res) {
         .eq("stripe_subscription_id", subscriptionId)
         .maybeSingle();
       subRow = data || null;
-    } else {
+    }
+
+    if (!subRow) {
       const { data } = await supabaseAdmin
         .from("subscriptions")
         .select("*")
