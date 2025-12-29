@@ -1,16 +1,20 @@
 import Stripe from "stripe";
 import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
+import {
+  getResend,
+  buildCustomerSubscriptionEmail,
+  buildAdminSubscriptionEmail,
+} from "../../lib/subscriptionEmails";
 
 export const config = {
   api: {
-    bodyParser: false, // REQUIRED for Stripe signature verification
+    bodyParser: false,
   },
 };
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// ---- helpers ----
 async function readRawBody(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -32,13 +36,11 @@ function mapStripeSubStatus(status) {
   return "pending";
 }
 
-// ---- subscription upsert from checkout ----
 async function upsertSubscriptionFromCheckoutSession({ stripe, supabaseAdmin, session }) {
-  if (!session.subscription) return;
+  if (!session.subscription) return null;
 
   const subscriptionId = String(session.subscription);
   const customerId = session.customer ? String(session.customer) : null;
-
   const sub = await stripe.subscriptions.retrieve(subscriptionId);
 
   const md = session.metadata || {};
@@ -51,11 +53,7 @@ async function upsertSubscriptionFromCheckoutSession({ stripe, supabaseAdmin, se
     status,
 
     name: md.name || null,
-    email:
-      session.customer_details?.email ||
-      session.customer_email ||
-      md.email ||
-      null,
+    email: session.customer_details?.email || session.customer_email || md.email || null,
     phone: md.phone || null,
 
     postcode: md.postcode || null,
@@ -72,12 +70,8 @@ async function upsertSubscriptionFromCheckoutSession({ stripe, supabaseAdmin, se
     next_collection_date: toDateOnlyFromUnix(sub.current_period_end),
 
     payload: {
+      ...md,
       source: "checkout.session.completed",
-      frequency: md.frequency,
-      extraBags: Number(md.extraBags ?? 0),
-      useOwnBin: md.useOwnBin === "yes",
-      routeDay: md.routeDay || "",
-      routeArea: md.routeArea || "",
     },
   };
 
@@ -85,17 +79,22 @@ async function upsertSubscriptionFromCheckoutSession({ stripe, supabaseAdmin, se
     .from("subscriptions")
     .upsert(row, { onConflict: "stripe_subscription_id" });
 
-  if (error) {
-    throw new Error(`Supabase upsert failed: ${error.message}`);
-  }
+  if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
+
+  // Return the updated row
+  const { data: saved } = await supabaseAdmin
+    .from("subscriptions")
+    .select("*")
+    .eq("stripe_subscription_id", subscriptionId)
+    .maybeSingle();
+
+  return saved || null;
 }
 
-// ---- subscription status updates ----
 async function updateSubscriptionStatus({ stripe, supabaseAdmin, subscriptionId }) {
   if (!subscriptionId) return;
 
   const sub = await stripe.subscriptions.retrieve(String(subscriptionId));
-
   const status = mapStripeSubStatus(sub.status);
 
   const { error } = await supabaseAdmin
@@ -108,12 +107,61 @@ async function updateSubscriptionStatus({ stripe, supabaseAdmin, subscriptionId 
     })
     .eq("stripe_subscription_id", String(subscriptionId));
 
-  if (error) {
-    throw new Error(`Supabase update failed: ${error.message}`);
+  if (error) throw new Error(`Supabase update failed: ${error.message}`);
+}
+
+async function sendSubscriptionEmailsOnce({ supabaseAdmin, subRow }) {
+  if (!subRow) return;
+
+  const resend = getResend();
+  if (!resend) {
+    console.warn("RESEND_API_KEY missing; skipping subscription emails.");
+    return;
+  }
+
+  const adminTo =
+    process.env.AROC_ADMIN_EMAIL ||
+    process.env.ADMIN_EMAIL ||
+    process.env.RESEND_ADMIN_EMAIL ||
+    "";
+
+  // Send customer email once
+  if (!subRow.customer_email_sent_at && subRow.email) {
+    const customerEmail = buildCustomerSubscriptionEmail(subRow);
+
+    await resend.emails.send({
+      from: "AROC Waste <bookings@arocwaste.co.uk>",
+      to: subRow.email,
+      subject: customerEmail.subject,
+      html: customerEmail.html,
+      text: customerEmail.text,
+    });
+
+    await supabaseAdmin
+      .from("subscriptions")
+      .update({ customer_email_sent_at: new Date().toISOString() })
+      .eq("id", subRow.id);
+  }
+
+  // Send admin email once (only if configured)
+  if (!subRow.admin_email_sent_at && adminTo) {
+    const adminEmail = buildAdminSubscriptionEmail(subRow);
+
+    await resend.emails.send({
+      from: "AROC Waste <bookings@arocwaste.co.uk>",
+      to: adminTo,
+      subject: adminEmail.subject,
+      html: adminEmail.html,
+      text: adminEmail.text,
+    });
+
+    await supabaseAdmin
+      .from("subscriptions")
+      .update({ admin_email_sent_at: new Date().toISOString() })
+      .eq("id", subRow.id);
   }
 }
 
-// ---- handler ----
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method not allowed");
 
@@ -126,9 +174,7 @@ export default async function handler(req, res) {
 
   const supabaseAdmin = getSupabaseAdmin();
   if (!supabaseAdmin) {
-    return res.status(500).json({
-      error: "Supabase not configured (service role missing)",
-    });
+    return res.status(500).json({ error: "Supabase not configured (service role missing)" });
   }
 
   const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
@@ -147,13 +193,18 @@ export default async function handler(req, res) {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
+
         if (session.mode === "subscription") {
-          await upsertSubscriptionFromCheckoutSession({
+          const subRow = await upsertSubscriptionFromCheckoutSession({
             stripe,
             supabaseAdmin,
             session,
           });
+
+          // ✅ Send emails once (idempotent via subscriptions table flags)
+          await sendSubscriptionEmailsOnce({ supabaseAdmin, subRow });
         }
+
         break;
       }
 
@@ -180,14 +231,12 @@ export default async function handler(req, res) {
       }
 
       default:
-        // ignore
         break;
     }
 
     return res.status(200).json({ received: true });
   } catch (err) {
     console.error("stripe-webhook handler error:", err);
-    // Return 500 so Stripe retries (safe)
-    return res.status(500).json({ error: "Webhook handler failed" });
+    return res.status(500).json({ error: "Webhook handler failed", detail: err?.message || "" });
   }
 }
