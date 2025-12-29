@@ -9,6 +9,10 @@ function clampInt(n, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(x)));
 }
 
+function isStripePriceId(v) {
+  return typeof v === "string" && v.trim().startsWith("price_");
+}
+
 function pickPrices(frequency) {
   // frequency: "weekly" | "fortnightly" | "threeweekly"
   const map = {
@@ -29,6 +33,29 @@ function pickPrices(frequency) {
   return map[frequency] || null;
 }
 
+function validateEnvForPrices() {
+  const missing = [];
+  const invalid = [];
+
+  const required = [
+    "STRIPE_PRICE_BIN_WEEKLY",
+    "STRIPE_PRICE_BIN_FORTNIGHTLY",
+    "STRIPE_PRICE_BIN_THREEWEEKLY",
+    "STRIPE_PRICE_BAG_WEEKLY",
+    "STRIPE_PRICE_BAG_FORTNIGHTLY",
+    "STRIPE_PRICE_BAG_THREEWEEKLY",
+    "STRIPE_PRICE_BIN_DEPOSIT",
+  ];
+
+  for (const key of required) {
+    const val = process.env[key];
+    if (!val) missing.push(key);
+    else if (!isStripePriceId(val)) invalid.push(`${key}=${String(val).trim()}`);
+  }
+
+  return { missing, invalid };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -37,6 +64,18 @@ export default async function handler(req, res) {
 
   if (!secretKey || !secretKey.startsWith("sk_")) {
     return res.status(500).json({ error: "Missing or invalid STRIPE_SECRET_KEY" });
+  }
+
+  // ✅ Make missing/invalid env vars explicit (helps instantly on Vercel)
+  const envCheck = validateEnvForPrices();
+  if (envCheck.missing.length || envCheck.invalid.length) {
+    return res.status(500).json({
+      error: "Stripe price configuration error",
+      missing: envCheck.missing,
+      invalid: envCheck.invalid,
+      hint:
+        "Check Vercel Environment Variables are set for the environment you are testing (Production vs Preview), and values start with price_. Redeploy after changes.",
+    });
   }
 
   const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
@@ -50,45 +89,44 @@ export default async function handler(req, res) {
     const postcode = String(body.postcode || "").trim();
     const address = String(body.address || "").trim();
 
-    const frequency = String(body.frequency || "weekly"); // weekly|fortnightly|threeweekly
+    const frequencyRaw = String(body.frequency || "weekly").trim().toLowerCase();
+    const allowed = new Set(["weekly", "fortnightly", "threeweekly"]);
+    const frequency = allowed.has(frequencyRaw) ? frequencyRaw : "weekly";
+
     const extraBags = clampInt(body.extraBags ?? 0, 0, 10);
     const useOwnBin = Boolean(body.useOwnBin);
 
     const routeDay = String(body.routeDay || "");
     const routeArea = String(body.routeArea || "");
 
-    if (!email || !postcode || !address || !frequency) {
+    if (!email || !postcode || !address) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     const prices = pickPrices(frequency);
     if (!prices?.bin || !prices?.bag) {
       return res.status(500).json({
-        error:
-          "Stripe Price IDs missing. Check STRIPE_PRICE_BIN_* and STRIPE_PRICE_BAG_* env vars.",
+        error: `Stripe Price IDs not mapped for frequency="${frequency}"`,
+        debug: {
+          frequency,
+          bin: prices?.bin || null,
+          bag: prices?.bag || null,
+        },
       });
     }
 
     const depositPriceId = process.env.STRIPE_PRICE_BIN_DEPOSIT;
-    if (!depositPriceId) {
-      return res.status(500).json({
-        error: "Missing STRIPE_PRICE_BIN_DEPOSIT env var",
-      });
-    }
 
     const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
 
     // Build subscription line items
-    const line_items = [
-      { price: prices.bin, quantity: 1 }, // bin service
-    ];
+    const line_items = [{ price: prices.bin, quantity: 1 }];
 
     if (extraBags > 0) {
-      line_items.push({ price: prices.bag, quantity: extraBags }); // recurring add-on
+      line_items.push({ price: prices.bag, quantity: extraBags });
     }
 
     // One-time deposit (if NOT using own bin)
-    // Checkout subscription mode supports adding one-time invoice items via subscription_data.add_invoice_items
     const subscription_data = {};
     if (!useOwnBin) {
       subscription_data.add_invoice_items = [{ price: depositPriceId, quantity: 1 }];
@@ -118,7 +156,7 @@ export default async function handler(req, res) {
       cancel_url: `${origin}/bins-bags`,
     });
 
-    // Save a pending row (best-effort) so you can track signups even before webhook
+    // Save a pending row (best-effort)
     try {
       const supabaseAdmin = getSupabaseAdmin();
       if (supabaseAdmin) {
