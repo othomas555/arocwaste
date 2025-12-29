@@ -3,10 +3,9 @@ import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 function parseISODateOrNull(s) {
   if (!s) return null;
   if (typeof s !== "string") return null;
-  // Expect YYYY-MM-DD
   const d = new Date(s + "T00:00:00");
   if (Number.isNaN(d.getTime())) return null;
-  return s; // keep as YYYY-MM-DD string for Postgres date param
+  return s; // YYYY-MM-DD
 }
 
 export default async function handler(req, res) {
@@ -33,18 +32,19 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing subscriptionId" });
     }
 
-    const collectedDate = parseISODateOrNull(body.collectedDate); // optional
+    const collectedDate = parseISODateOrNull(body.collectedDate);
 
     const supabase = getSupabaseAdmin();
 
-    const { data, error } = await supabase.rpc("mark_subscription_collected", {
-      p_subscription_id: subscriptionId,
-      p_collected_date: collectedDate, // null => default current_date in function
-    });
+    // IMPORTANT:
+    // If collectedDate is null, OMIT the param so Postgres default kicks in.
+    const rpcArgs = { p_subscription_id: subscriptionId };
+    if (collectedDate) rpcArgs.p_collected_date = collectedDate;
+
+    const { data, error } = await supabase.rpc("mark_subscription_collected", rpcArgs);
 
     if (error) throw new Error(error.message);
 
-    // data will be an array of rows because it's a RETURNS TABLE function
     const row = Array.isArray(data) ? data[0] : null;
 
     return res.status(200).json({
