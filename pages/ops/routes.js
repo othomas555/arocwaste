@@ -83,24 +83,15 @@ export default function OpsRoutes() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           subscriptionId,
-          collectedDate, // default is "today" because we set it that way
+          collectedDate, // defaults to today (or whatever operator set)
         }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to mark collected");
 
-      setRows((prev) =>
-        prev.map((r) =>
-          r.id === subscriptionId
-            ? {
-                ...r,
-                next_collection_date: data.next_collection_date || r.next_collection_date,
-                is_due: false,
-              }
-            : r
-        )
-      );
+      // ✅ Auto refresh so the list is always accurate (esp. when Due only is on)
+      await load();
     } catch (e) {
       setError(e.message || "Something went wrong");
     } finally {
@@ -127,19 +118,8 @@ export default function OpsRoutes() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to undo");
 
-      setRows((prev) =>
-        prev.map((r) =>
-          r.id === subscriptionId
-            ? {
-                ...r,
-                next_collection_date: data.next_collection_date || r.next_collection_date,
-                // If the reverted date lands inside the selected week, it may now be due again.
-                // Easiest: refresh the list if you want perfect accuracy; but we’ll do a light heuristic:
-                is_due: true,
-              }
-            : r
-        )
-      );
+      // ✅ Auto refresh so due flags / filtering are 100% correct
+      await load();
     } catch (e) {
       setError(e.message || "Something went wrong");
     } finally {
@@ -288,18 +268,16 @@ export default function OpsRoutes() {
                       <div className="flex gap-2">
                         <button
                           onClick={() => markCollected(r.id)}
-                          disabled={!r.is_due || markingId === r.id}
+                          disabled={!r.is_due || markingId === r.id || loading}
                           className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-100 disabled:opacity-50"
-                          title={!r.is_due ? "Only available for due stops" : "Mark collected"}
                         >
                           {markingId === r.id ? "Saving..." : "Mark collected"}
                         </button>
 
                         <button
                           onClick={() => undoCollected(r.id)}
-                          disabled={undoingId === r.id}
+                          disabled={undoingId === r.id || loading}
                           className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-100 disabled:opacity-50"
-                          title="Undo last collection"
                         >
                           {undoingId === r.id ? "Undoing..." : "Undo"}
                         </button>
