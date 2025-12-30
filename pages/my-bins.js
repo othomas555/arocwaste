@@ -50,10 +50,13 @@ export default function MyBins() {
 
     setLoading(true);
     try {
+      const origin = window.location.origin;
+      const redirectTo = `${origin}/auth/callback?next=/my-bins`;
+
       const { error } = await supabaseClient.auth.signInWithOtp({
         email: clean,
         options: {
-          emailRedirectTo: `${window.location.origin}/my-bins`,
+          emailRedirectTo: redirectTo,
         },
       });
 
