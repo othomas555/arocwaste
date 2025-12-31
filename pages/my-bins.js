@@ -12,6 +12,7 @@ export default function MyBins() {
   const [sent, setSent] = useState(false);
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [portalLoadingId, setPortalLoadingId] = useState(null);
   const [subs, setSubs] = useState([]);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
@@ -121,6 +122,35 @@ export default function MyBins() {
       setError(e.message || "Something went wrong");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function openStripePortal(subscriptionId) {
+    setError("");
+    setMsg("");
+    if (!session?.access_token) return;
+
+    setPortalLoadingId(subscriptionId);
+
+    try {
+      const res = await fetch("/api/customer/create-portal-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ subscriptionId }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to open Stripe portal");
+      if (!data?.url) throw new Error("Missing portal URL");
+
+      window.location.href = data.url;
+    } catch (e) {
+      setError(e.message || "Something went wrong");
+    } finally {
+      setPortalLoadingId(null);
     }
   }
 
@@ -236,16 +266,13 @@ export default function MyBins() {
                 </div>
 
                 <div className="flex flex-col gap-2 sm:min-w-[260px]">
-                  <a
-                    href={s.portal_url || "#"}
-                    className={`rounded-xl border px-4 py-2 text-sm font-semibold ${
-                      s.portal_url
-                        ? "border-gray-300 bg-white text-gray-900 hover:bg-gray-100"
-                        : "border-gray-200 bg-gray-50 text-gray-400 pointer-events-none"
-                    }`}
+                  <button
+                    onClick={() => openStripePortal(s.id)}
+                    disabled={portalLoadingId === s.id || loading}
+                    className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-100 disabled:opacity-50"
                   >
-                    Manage in Stripe
-                  </a>
+                    {portalLoadingId === s.id ? "Opening..." : "Manage in Stripe"}
+                  </button>
 
                   <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
                     <div className="text-xs font-semibold text-gray-700">Pause collections</div>
@@ -277,7 +304,7 @@ export default function MyBins() {
               </div>
 
               <div className="mt-4 text-xs text-gray-500">
-                To change plan frequency or extra bags, use Stripe portal unless you’ve enabled price IDs for in-site changes.
+                For changing plan frequency or extra bags, use Stripe portal (next we can add changes directly here).
               </div>
             </div>
           ))}
