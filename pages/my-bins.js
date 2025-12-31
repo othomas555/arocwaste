@@ -213,7 +213,15 @@ export default function MyBins() {
             <h1 className="text-2xl font-bold text-gray-900">My Bins</h1>
             <p className="text-sm text-gray-600">Signed in as {session.user?.email}</p>
           </div>
-          <div className="flex gap-2">
+
+          <div className="flex flex-wrap gap-2">
+            <a
+              href="/my-bins/calendar"
+              className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-100"
+            >
+              View calendar
+            </a>
+
             <button
               onClick={loadSubs}
               disabled={loading}
@@ -221,6 +229,7 @@ export default function MyBins() {
             >
               Refresh
             </button>
+
             <button
               onClick={logout}
               className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
@@ -253,14 +262,16 @@ export default function MyBins() {
                   <div className="mt-1 text-sm text-gray-700">{s.address}</div>
                   <div className="text-sm text-gray-600">{s.postcode}</div>
                   <div className="mt-2 text-sm text-gray-700">
-                    Next collection: <span className="font-semibold">{s.next_collection_date || "—"}</span>
+                    Next collection:{" "}
+                    <span className="font-semibold">{s.next_collection_date || "—"}</span>
                   </div>
                   <div className="text-sm text-gray-700">
                     Extra bags: <span className="font-semibold">{s.extra_bags ?? 0}</span>
                   </div>
                   {s.pause_from || s.pause_to ? (
                     <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                      Paused {s.pause_from ? `from ${s.pause_from}` : ""} {s.pause_to ? `to ${s.pause_to}` : ""}
+                      Paused {s.pause_from ? `from ${s.pause_from}` : ""}{" "}
+                      {s.pause_to ? `to ${s.pause_to}` : ""}
                     </div>
                   ) : null}
                 </div>
@@ -285,7 +296,12 @@ export default function MyBins() {
                       />
                       <button
                         disabled={loading}
-                        onClick={() => doUpdate("pause", { subscriptionId: s.id, pauseTo: s._pauseTo || todayISO() })}
+                        onClick={() =>
+                          doUpdate("pause", {
+                            subscriptionId: s.id,
+                            pauseTo: s._pauseTo || todayISO(),
+                          })
+                        }
                         className="rounded-lg bg-black px-3 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
                       >
                         Pause
@@ -304,7 +320,7 @@ export default function MyBins() {
               </div>
 
               <div className="mt-4 text-xs text-gray-500">
-                For changing plan frequency or extra bags, use Stripe portal (next we can add changes directly here).
+                Use “Manage in Stripe” to update payment details or cancel.
               </div>
             </div>
           ))}
