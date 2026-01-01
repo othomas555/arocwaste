@@ -127,7 +127,6 @@ export default function OpsSubscribersPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save subscriber");
 
-      // refresh list + keep editor open
       setRefreshKey((k) => k + 1);
       setOpen(false);
       setActiveRow(null);
@@ -144,7 +143,7 @@ export default function OpsSubscribersPage() {
         <div className="mb-4">
           <h1 className="text-xl font-semibold text-slate-900">Ops • Subscribers</h1>
           <p className="text-sm text-slate-600">
-            Assign route days/areas, set next collection dates, and put accounts on hold if unpaid.
+            Set route day/area, next collection date, and hold accounts if unpaid.
           </p>
         </div>
 
@@ -171,6 +170,7 @@ export default function OpsSubscribersPage() {
               placeholder="Search name, postcode, address, email, route area…"
               className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-200"
             />
+
             <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
@@ -238,15 +238,23 @@ export default function OpsSubscribersPage() {
                     </div>
 
                     <div className="mt-2 flex flex-wrap gap-2">
-                      <span className={cx("rounded-full px-3 py-1 text-xs font-semibold ring-1", badgeClass(r.status))}>
+                      <span
+                        className={cx(
+                          "rounded-full px-3 py-1 text-xs font-semibold ring-1",
+                          badgeClass(r.status)
+                        )}
+                      >
                         {r.status || "status?"}
                       </span>
+
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         {r.frequency || "frequency?"}
                       </span>
+
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         Extra bags: {Number(r.extra_bags) || 0}
                       </span>
+
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         Next: {r.next_collection_date || "—"}
                       </span>
@@ -341,67 +349,3 @@ export default function OpsSubscribersPage() {
                   <option value="Thursday">Thursday</option>
                   <option value="Friday">Friday</option>
                   <option value="Saturday">Saturday</option>
-                  <option value="Sunday">Sunday</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Pause from</label>
-                <input
-                  value={activeRow.pause_from || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, pause_from: e.target.value })}
-                  placeholder="YYYY-MM-DD"
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Pause to</label>
-                <input
-                  value={activeRow.pause_to || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, pause_to: e.target.value })}
-                  placeholder="YYYY-MM-DD"
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-slate-600">Ops notes</label>
-                <textarea
-                  value={activeRow.ops_notes || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, ops_notes: e.target.value })}
-                  placeholder="Gate code, side access, bin location, dog, etc."
-                  rows={4}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={save}
-                disabled={saving}
-                className={cx(
-                  "rounded-xl px-4 py-3 text-sm font-semibold shadow-sm ring-1 active:scale-[0.99]",
-                  saving
-                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
-                )}
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-              <button
-                type="button"
-                onClick={closeEditor}
-                className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-slate-300 hover:bg-slate-50 active:scale-[0.99]"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
