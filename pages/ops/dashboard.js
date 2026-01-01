@@ -1,615 +1,774 @@
-import { useEffect, useMemo, useState } from "react";
+// pages/ops/dashboard.js
+import { useMemo, useState } from "react";
 import Link from "next/link";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
-function cx(...classes) {
-  return classes.filter(Boolean).join(" ");
+function isoDate(d) {
+  // d is Date
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-const WEEKDAYS_MON_FRI = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
-
-function londonYMD(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/London",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const y = parts.find((p) => p.type === "year")?.value;
-  const m = parts.find((p) => p.type === "month")?.value;
-  const d = parts.find((p) => p.type === "day")?.value;
-  return `${y}-${m}-${d}`;
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
 }
 
-function londonWeekday(date = new Date()) {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    weekday: "long",
-  }).format(date);
+function startOfWeekMonday(date) {
+  const d = new Date(date);
+  const day = d.getDay(); // Sun=0..Sat=6
+  const diff = (day === 0 ? -6 : 1) - day; // move to Monday
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
-function addDaysYMD(ymd, days) {
-  const [y, m, d] = String(ymd).split("-").map((x) => parseInt(x, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + days);
-  return londonYMD(dt);
+function isPausedOn(sub, yyyyMmDd) {
+  // pause_from / pause_to are expected as YYYY-MM-DD or null
+  if (!sub) return false;
+  const from = sub.pause_from;
+  const to = sub.pause_to;
+
+  if (!from && !to) return false;
+  if (from && !to) return yyyyMmDd >= from;
+  if (!from && to) return yyyyMmDd <= to;
+  return yyyyMmDd >= from && yyyyMmDd <= to;
 }
 
-function safeNum(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : 0;
+function classNames(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function isActiveLike(status) {
-  return status === "active" || status === "trialing";
-}
+export default function OpsDashboard(props) {
+  const {
+    today,
+    todayName,
+    thisWeekDays, // [{date,label,dayName}]
+    overviewByArea, // [{route_area, route_day, due_count, paused_count}]
+    weekPlanner, // { [date]: { [area]: count } }
+    areas, // [{route_area, route_day}]
+    alerts,
+    vehicles,
+    staff,
+  } = props;
 
-export default function OpsDashboardPage() {
-  const today = useMemo(() => londonYMD(new Date()), []);
-  const todayName = useMemo(() => londonWeekday(new Date()), []);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createArea, setCreateArea] = useState(null); // {route_area, route_day}
+  const [vehicleId, setVehicleId] = useState("");
+  const [staffIds, setStaffIds] = useState([]);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
 
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const [subs, setSubs] = useState([]);
-  const [runsToday, setRunsToday] = useState([]);
-  const [staff, setStaff] = useState([]);
-  const [vehicles, setVehicles] = useState([]);
-
-  // quick-create state
-  const [quick, setQuick] = useState({
-    open: false,
-    route_area: "",
-    route_day: todayName,
-    vehicle_id: "",
-    staff_ids: [],
-    notes: "",
-  });
-
-  async function load() {
-    setLoading(true);
-    setError("");
-    try {
-      const [rSubs, rRuns, rStaff, rVehicles] = await Promise.all([
-        fetch("/api/ops/subscribers"),
-        fetch(`/api/ops/daily-runs?date=${encodeURIComponent(today)}`),
-        fetch("/api/ops/staff"),
-        fetch("/api/ops/vehicles"),
-      ]);
-
-      const jSubs = await rSubs.json();
-      const jRuns = await rRuns.json();
-      const jStaff = await rStaff.json();
-      const jVehicles = await rVehicles.json();
-
-      if (!rSubs.ok) throw new Error(jSubs?.error || "Failed to load subscribers");
-      if (!rRuns.ok) throw new Error(jRuns?.error || "Failed to load daily runs");
-      if (!rStaff.ok) throw new Error(jStaff?.error || "Failed to load staff");
-      if (!rVehicles.ok) throw new Error(jVehicles?.error || "Failed to load vehicles");
-
-      setSubs(Array.isArray(jSubs?.subscribers) ? jSubs.subscribers : []);
-      setRunsToday(Array.isArray(jRuns?.runs) ? jRuns.runs : []);
-      setStaff(Array.isArray(jStaff?.staff) ? jStaff.staff : []);
-      setVehicles(Array.isArray(jVehicles?.vehicles) ? jVehicles.vehicles : []);
-    } catch (e) {
-      setError(e.message || "Load failed");
-    } finally {
-      setLoading(false);
+  const staffByRole = useMemo(() => {
+    const drivers = [];
+    const others = [];
+    for (const s of staff || []) {
+      // role is optional; fall back to "driver" assumption if name contains driver? (no)
+      if ((s.role || "").toLowerCase().includes("driver")) drivers.push(s);
+      else others.push(s);
     }
+    return { drivers, others };
+  }, [staff]);
+
+  function openCreate(areaObj) {
+    setCreateError("");
+    setVehicleId("");
+    setStaffIds([]);
+    setCreateArea(areaObj);
+    setCreateOpen(true);
   }
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  function toggleStaff(id) {
+    setStaffIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }
 
-  const activeStaff = useMemo(() => staff.filter((s) => s.active), [staff]);
-  const activeVehicles = useMemo(() => vehicles.filter((v) => v.active), [vehicles]);
+  async function tryCreateDailyRun(payload) {
+    // Robust: try common endpoints in order (whichever you already have).
+    const candidates = [
+      "/api/ops/daily-runs", // POST (common REST style)
+      "/api/ops/daily-runs/create", // POST
+      "/api/ops/create-daily-run", // POST
+    ];
 
-  // ---------- TODAY OVERVIEW ----------
-  const todayDue = useMemo(() => {
-    return subs
-      .filter((s) => isActiveLike(s.status))
-      .filter((s) => String(s.next_collection_date || "") === today);
-  }, [subs, today]);
+    let lastErr = null;
 
-  const todayTotals = useMemo(() => {
-    const totalStops = todayDue.length;
-    const extraBags = todayDue.reduce((sum, s) => sum + safeNum(s.extra_bags), 0);
-    return { totalStops, extraBags };
-  }, [todayDue]);
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-  const todayByArea = useMemo(() => {
-    const map = new Map();
-    for (const s of todayDue) {
-      const area = (s.route_area || "Unassigned area").toString().trim() || "Unassigned area";
-      const cur = map.get(area) || { area, stops: 0, extraBags: 0 };
-      cur.stops += 1;
-      cur.extraBags += safeNum(s.extra_bags);
-      map.set(area, cur);
-    }
-    return Array.from(map.values()).sort((a, b) => b.stops - a.stops);
-  }, [todayDue]);
+        if (res.status === 404) continue; // try next candidate
 
-  // ---------- THIS WEEK PLANNER (Mon–Fri ahead) ----------
-  const weekDates = useMemo(() => {
-    const out = [];
-    for (let i = 0; i < 10; i++) {
-      const d = addDaysYMD(today, i);
-      const name = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Europe/London",
-        weekday: "long",
-      }).format(new Date(d + "T00:00:00Z"));
-      if (WEEKDAYS_MON_FRI.includes(name)) out.push({ ymd: d, weekday: name });
-      if (out.length === 5) break;
-    }
-    return out;
-  }, [today]);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          lastErr = new Error(data?.error || `Create run failed (${res.status})`);
+          continue;
+        }
 
-  const weekPlanner = useMemo(() => {
-    const active = subs.filter((s) => isActiveLike(s.status));
-    return weekDates.map(({ ymd, weekday }) => {
-      const due = active.filter((s) => String(s.next_collection_date || "") === ymd);
+        // Expected: { id } or { run: { id } }
+        const id = data?.id || data?.run?.id;
+        if (!id) {
+          lastErr = new Error("Create run succeeded but no run id returned.");
+          continue;
+        }
 
-      const byRouteDay = new Map();
-      for (const s of due) {
-        const rd = (s.route_day || "Missing route_day").toString().trim() || "Missing route_day";
-        const cur = byRouteDay.get(rd) || { route_day: rd, stops: 0 };
-        cur.stops += 1;
-        byRouteDay.set(rd, cur);
+        return { id };
+      } catch (e) {
+        lastErr = e;
       }
-
-      return {
-        ymd,
-        weekday,
-        totalStops: due.length,
-        groups: Array.from(byRouteDay.values()).sort((a, b) => b.stops - a.stops),
-      };
-    });
-  }, [subs, weekDates]);
-
-  // ---------- OPS ALERTS ----------
-  const alerts = useMemo(() => {
-    const active = subs.filter((s) => isActiveLike(s.status));
-    const missingRouteDay = active.filter((s) => !(s.route_day || "").toString().trim());
-    const missingNextDate = active.filter((s) => !(s.next_collection_date || "").toString().trim());
-    const missingArea = active.filter((s) => !(s.route_area || "").toString().trim());
-    return { missingRouteDay, missingNextDate, missingArea };
-  }, [subs]);
-
-  // ---------- RUNS TODAY ----------
-  const runsTodayCards = useMemo(() => {
-    return (runsToday || [])
-      .slice()
-      .sort((a, b) => String(a.route_area || "").localeCompare(String(b.route_area || "")))
-      .map((r) => {
-        const staffNames = Array.isArray(r.daily_run_staff)
-          ? r.daily_run_staff.map((x) => x.staff?.name).filter(Boolean).join(", ")
-          : "";
-        const vehicleLabel = r.vehicles
-          ? `${r.vehicles.registration}${r.vehicles.name ? ` • ${r.vehicles.name}` : ""}`
-          : "— no vehicle —";
-        return {
-          id: r.id,
-          route_area: r.route_area,
-          route_day: r.route_day,
-          vehicleLabel,
-          staffNames,
-          notes: r.notes || "",
-        };
-      });
-  }, [runsToday]);
-
-  const runKeysToday = useMemo(() => {
-    // prevent accidental duplicate runs per date/area/day
-    const set = new Set();
-    for (const r of runsToday || []) {
-      set.add(`${r.route_area}||${r.route_day}`);
     }
-    return set;
-  }, [runsToday]);
 
-  function toggleStaff(list, staffId) {
-    const set = new Set(list);
-    if (set.has(staffId)) set.delete(staffId);
-    else set.add(staffId);
-    return Array.from(set);
+    throw lastErr || new Error("No create-run API route found.");
   }
 
-  function openQuickCreate(area, routeDay) {
-    setQuick((q) => ({
-      ...q,
-      open: true,
-      route_area: area,
-      route_day: routeDay || todayName,
-      vehicle_id: "",
-      staff_ids: [],
-      notes: "",
-    }));
-  }
+  async function onCreateRun() {
+    setCreateError("");
 
-  async function createRunQuick() {
-    setBusy(true);
-    setError("");
+    if (!createArea?.route_area) {
+      setCreateError("Missing route area.");
+      return;
+    }
+    if (!createArea?.route_day) {
+      setCreateError("Missing route day for this area.");
+      return;
+    }
+    if (!vehicleId) {
+      setCreateError("Select a vehicle.");
+      return;
+    }
+    if (!staffIds.length) {
+      setCreateError("Select at least one staff member.");
+      return;
+    }
+
+    setCreating(true);
     try {
       const payload = {
         run_date: today,
-        route_day: (quick.route_day || "").toString().trim(),
-        route_area: (quick.route_area || "").toString().trim(),
-        vehicle_id: quick.vehicle_id || null,
-        notes: quick.notes || "",
-        staff_ids: Array.isArray(quick.staff_ids) ? quick.staff_ids : [],
+        route_area: createArea.route_area,
+        route_day: createArea.route_day,
+        vehicle_id: vehicleId,
+        staff_ids: staffIds,
       };
 
-      if (!payload.route_day) throw new Error("route_day is required");
-      if (!payload.route_area) throw new Error("route_area is required");
+      const { id } = await tryCreateDailyRun(payload);
 
-      const dupKey = `${payload.route_area}||${payload.route_day}`;
-      if (runKeysToday.has(dupKey)) {
-        throw new Error("A run for this area/day already exists today.");
-      }
-
-      const res = await fetch("/api/ops/daily-runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "Create run failed");
-
-      setQuick((q) => ({ ...q, open: false }));
-      await load();
+      // Go straight to run view
+      window.location.href = `/ops/run/${id}`;
     } catch (e) {
-      setError(e.message || "Create failed");
-    } finally {
-      setBusy(false);
+      setCreateError(e?.message || "Failed to create run.");
+      setCreating(false);
     }
   }
 
+  const navLinks = [
+    { href: "/ops/subscribers", title: "Subscribers", desc: "Status, routes, next dates" },
+    { href: "/ops/today", title: "Today List", desc: "Due today + mark collected" },
+    { href: "/ops/daily-runs", title: "Daily Runs", desc: "Plan runs + assign staff/vehicle" },
+    { href: "/ops/staff", title: "Staff", desc: "Drivers & crew" },
+    { href: "/ops/vehicles", title: "Vehicles", desc: "Vans, capacity, notes" },
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-6xl px-3 py-4">
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-6xl px-4 py-6">
+        {/* Header */}
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-slate-900">Ops • Dashboard</h1>
-            <p className="text-sm text-slate-600">
+            <h1 className="text-2xl font-semibold text-gray-900">Ops Dashboard</h1>
+            <p className="text-sm text-gray-600">
               {todayName} • {today}
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Link href="/ops/subscribers" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Subscribers
-            </Link>
-            <Link href="/ops/today" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Today list
-            </Link>
-            <Link href="/ops/daily-runs" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Daily runs
-            </Link>
-            <Link href="/ops/staff" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Staff
-            </Link>
-            <Link href="/ops/vehicles" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Vehicles
-            </Link>
-
-            {/* NEW */}
-            <Link href="/driver/login" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+            <Link
+              href="/driver/login"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
               Driver portal
             </Link>
-
-            <button
-              type="button"
-              onClick={load}
-              className="rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-900"
+            <Link
+              href="/ops/today"
+              className="rounded-lg bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-black"
             >
-              Refresh
-            </button>
+              Open Today List
+            </Link>
           </div>
         </div>
 
-        {error ? (
-          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
-        ) : null}
-
-        {/* KPI cards */}
-        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="text-xs font-semibold text-slate-600">Today stops</div>
-            <div className="mt-1 text-2xl font-semibold text-slate-900">{loading ? "…" : todayTotals.totalStops}</div>
-          </div>
-
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="text-xs font-semibold text-slate-600">Today extra bags</div>
-            <div className="mt-1 text-2xl font-semibold text-slate-900">{loading ? "…" : todayTotals.extraBags}</div>
-          </div>
-
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="text-xs font-semibold text-slate-600">Ops alerts</div>
-            <div className="mt-1 text-2xl font-semibold text-slate-900">
-              {loading ? "…" : alerts.missingRouteDay.length + alerts.missingNextDate.length}
-            </div>
-            <div className="mt-1 text-xs text-slate-500">active/trialing missing route_day or next_collection_date</div>
-          </div>
+        {/* Quick nav */}
+        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {navLinks.map((x) => (
+            <Link
+              key={x.href}
+              href={x.href}
+              className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm hover:border-gray-300"
+            >
+              <div className="text-sm font-semibold text-gray-900">{x.title}</div>
+              <div className="mt-1 text-xs text-gray-600">{x.desc}</div>
+            </Link>
+          ))}
         </div>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {/* Today overview + quick create */}
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-slate-900">Today overview</div>
-              <Link href="/ops/today" className="text-sm font-semibold text-slate-900 underline">
-                Open today list
+        {/* Today overview + Alerts */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900">Today overview</h2>
+                <p className="text-xs text-gray-600">Grouped by route area (due today)</p>
+              </div>
+              <Link
+                href="/ops/today"
+                className="text-sm font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+              >
+                View full list
               </Link>
             </div>
 
-            {loading ? (
-              <div className="text-sm text-slate-600">Loading…</div>
-            ) : todayByArea.length === 0 ? (
-              <div className="text-sm text-slate-700">No due stops today.</div>
-            ) : (
-              <div className="space-y-2">
-                {todayByArea.map((g) => {
-                  const canCreate = g.area !== "Unassigned area";
-                  return (
-                    <div key={g.area} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-slate-900">{g.area}</div>
-                          <div className="text-xs text-slate-600">
-                            Stops: <span className="font-semibold text-slate-800">{g.stops}</span>
-                            <span className="mx-2 text-slate-300">•</span>
-                            Extra bags: <span className="font-semibold text-slate-800">{g.extraBags}</span>
+            <div className="overflow-hidden rounded-lg border border-gray-200">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-xs text-gray-600">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Route area</th>
+                    <th className="px-3 py-2 text-left">Route day</th>
+                    <th className="px-3 py-2 text-right">Due</th>
+                    <th className="px-3 py-2 text-right">Paused</th>
+                    <th className="px-3 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {overviewByArea.length ? (
+                    overviewByArea.map((row) => (
+                      <tr key={`${row.route_area}-${row.route_day}`} className="bg-white">
+                        <td className="px-3 py-2 font-medium text-gray-900">
+                          {row.route_area || "Unassigned"}
+                        </td>
+                        <td className="px-3 py-2 text-gray-700">{row.route_day || "-"}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-gray-900">
+                          {row.due_count}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-700">
+                          {row.paused_count}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <Link
+                              href={`/ops/today?area=${encodeURIComponent(
+                                row.route_area || ""
+                              )}`}
+                              className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
+                            >
+                              Open
+                            </Link>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openCreate({
+                                  route_area: row.route_area,
+                                  route_day: row.route_day,
+                                })
+                              }
+                              className={classNames(
+                                "rounded-lg px-2.5 py-1.5 text-xs font-semibold",
+                                row.due_count > 0
+                                  ? "bg-gray-900 text-white hover:bg-black"
+                                  : "bg-gray-200 text-gray-600 cursor-not-allowed"
+                              )}
+                              disabled={row.due_count <= 0}
+                              title={
+                                row.due_count > 0
+                                  ? "Create a run for today for this area"
+                                  : "No stops due today"
+                              }
+                            >
+                              Create run
+                            </button>
                           </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          disabled={!canCreate}
-                          onClick={() => openQuickCreate(g.area, todayName)}
-                          className={cx(
-                            "shrink-0 rounded-xl px-3 py-2 text-xs font-semibold ring-1",
-                            !canCreate
-                              ? "bg-slate-200 text-slate-500 ring-slate-200"
-                              : "bg-white text-slate-900 ring-slate-300 hover:bg-slate-100"
-                          )}
-                          title={!canCreate ? "Assign route_area first" : "Create a run for this area"}
-                        >
-                          Create run
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Today's runs */}
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-slate-900">Today’s runs</div>
-              <Link href="/ops/daily-runs" className="text-sm font-semibold text-slate-900 underline">
-                Manage runs
-              </Link>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className="px-3 py-4 text-center text-sm text-gray-600" colSpan={5}>
+                        No routes found for today.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
 
-            {loading ? (
-              <div className="text-sm text-slate-600">Loading…</div>
-            ) : runsTodayCards.length === 0 ? (
-              <div className="text-sm text-slate-700">No runs created for today yet.</div>
-            ) : (
-              <div className="space-y-2">
-                {runsTodayCards.map((r) => (
-                  <Link
-                    key={r.id}
-                    href={`/ops/run/${r.id}`}
-                    className="block rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200 hover:bg-slate-100"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-900">
-                          {r.route_area} • {r.route_day}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-600">
-                          {r.vehicleLabel}
-                          <span className="mx-2 text-slate-300">•</span>
-                          {r.staffNames || "No staff assigned"}
-                        </div>
-                        {r.notes ? <div className="mt-1 text-xs text-slate-500">{r.notes}</div> : null}
-                      </div>
-                      <div className="shrink-0 text-sm font-semibold text-slate-700">Open</div>
-                    </div>
-                  </Link>
-                ))}
+            <div className="mt-3 text-xs text-gray-500">
+              Tip: “Create run” is only enabled when there are stops due today for that route
+              area.
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">Ops alerts</h2>
+            <p className="text-xs text-gray-600">Quick sanity checks</p>
+
+            <div className="mt-3 space-y-2">
+              <AlertRow
+                label="Overdue collections"
+                value={alerts.overdue_active}
+                href="/ops/subscribers?filter=overdue"
+              />
+              <AlertRow
+                label="Pending (not active)"
+                value={alerts.pending}
+                href="/ops/subscribers?filter=pending"
+              />
+              <AlertRow
+                label="Missing route_day / route_area"
+                value={alerts.missing_route}
+                href="/ops/subscribers?filter=missing_route"
+              />
+              <AlertRow
+                label="Paused right now"
+                value={alerts.paused_now}
+                href="/ops/subscribers?filter=paused"
+              />
+            </div>
+
+            <div className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
+              <div className="font-semibold text-gray-900">Driver portal</div>
+              <div className="mt-1">
+                Drivers sign in here to view assigned runs and mark collections.
               </div>
-            )}
+              <Link
+                href="/driver/login"
+                className="mt-2 inline-block font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+              >
+                /driver/login
+              </Link>
+            </div>
           </div>
         </div>
 
         {/* Week planner */}
-        <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <div className="mb-2 text-sm font-semibold text-slate-900">This week planner (Mon–Fri)</div>
+        <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">This week planner (Mon–Fri)</h2>
+              <p className="text-xs text-gray-600">Counts by route area based on next_collection_date</p>
+            </div>
+            <Link
+              href="/ops/daily-runs"
+              className="text-sm font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+            >
+              Plan runs
+            </Link>
+          </div>
 
-          {loading ? (
-            <div className="text-sm text-slate-600">Loading…</div>
-          ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-              {weekPlanner.map((d) => (
-                <div key={d.ymd} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="text-xs font-semibold text-slate-600">{d.weekday}</div>
-                  <div className="text-xs text-slate-500">{d.ymd}</div>
-                  <div className="mt-2 text-lg font-semibold text-slate-900">{d.totalStops}</div>
-                  <div className="mt-2 space-y-1">
-                    {d.groups.length === 0 ? (
-                      <div className="text-xs text-slate-500">No due stops</div>
-                    ) : (
-                      d.groups.slice(0, 4).map((g) => (
-                        <div key={g.route_day} className="flex items-center justify-between text-xs text-slate-700">
-                          <span className="truncate">{g.route_day}</span>
-                          <span className="font-semibold">{g.stops}</span>
+          <div className="overflow-x-auto">
+            <table className="min-w-[900px] w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-600">
+                <tr>
+                  <th className="px-3 py-2 text-left">Area</th>
+                  {thisWeekDays.map((d) => (
+                    <th key={d.date} className="px-3 py-2 text-center">
+                      <div className="font-semibold text-gray-700">{d.dayName}</div>
+                      <div className="font-normal">{d.label}</div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {areas.length ? (
+                  areas.map((a) => (
+                    <tr key={`${a.route_area}-${a.route_day}`} className="bg-white">
+                      <td className="px-3 py-2 font-medium text-gray-900">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <div>{a.route_area || "Unassigned"}</div>
+                            <div className="text-xs font-normal text-gray-600">
+                              {a.route_day || "-"}
+                            </div>
+                          </div>
+                          <Link
+                            href={`/ops/subscribers?area=${encodeURIComponent(a.route_area || "")}`}
+                            className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
+                          >
+                            Subscribers
+                          </Link>
                         </div>
-                      ))
-                    )}
+                      </td>
+
+                      {thisWeekDays.map((d) => {
+                        const n = weekPlanner?.[d.date]?.[a.route_area || ""] || 0;
+                        return (
+                          <td key={`${a.route_area}-${d.date}`} className="px-3 py-2 text-center">
+                            <div
+                              className={classNames(
+                                "inline-flex min-w-[44px] items-center justify-center rounded-lg px-2 py-1 font-semibold",
+                                n > 0 ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"
+                              )}
+                            >
+                              {n}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-4 text-center text-sm text-gray-600" colSpan={6}>
+                      No route areas configured yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-3 text-xs text-gray-500">
+            This is intentionally simple: it reflects whatever is currently in{" "}
+            <span className="font-mono">subscriptions.next_collection_date</span>.
+          </div>
+        </div>
+      </div>
+
+      {/* Create run modal */}
+      {createOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xl rounded-2xl bg-white shadow-xl">
+            <div className="border-b border-gray-200 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Create daily run</div>
+                  <div className="mt-1 text-xs text-gray-600">
+                    {todayName} • {today}
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Alerts */}
-        <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <div className="mb-2 text-sm font-semibold text-slate-900">Ops alerts</div>
-
-          {loading ? (
-            <div className="text-sm text-slate-600">Loading…</div>
-          ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                <div className="text-xs font-semibold text-slate-600">Active missing route_day</div>
-                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingRouteDay.length}</div>
-                <div className="mt-2 text-xs text-slate-600">
-                  Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                <div className="text-xs font-semibold text-slate-600">Active missing next_collection_date</div>
-                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingNextDate.length}</div>
-                <div className="mt-2 text-xs text-slate-600">
-                  Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                <div className="text-xs font-semibold text-slate-600">Active missing route_area</div>
-                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingArea.length}</div>
-                <div className="mt-2 text-xs text-slate-600">
-                  Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Quick create drawer */}
-        {quick.open ? (
-          <div className="fixed inset-0 z-50">
-            <button
-              type="button"
-              className="absolute inset-0 bg-black/30"
-              onClick={() => setQuick((q) => ({ ...q, open: false }))}
-              aria-label="Close"
-            />
-            <div className="absolute inset-x-0 bottom-0 mx-auto max-w-6xl rounded-t-3xl bg-white p-4 shadow-2xl ring-1 ring-slate-200">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-base font-semibold text-slate-900">Create today’s run</div>
-                  <div className="mt-1 text-sm text-slate-600">
-                    {today} • {quick.route_area}
+                  <div className="mt-2 text-sm text-gray-900">
+                    Area:{" "}
+                    <span className="font-semibold">{createArea?.route_area || "-"}</span>{" "}
+                    <span className="text-gray-500">({createArea?.route_day || "-"})</span>
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setQuick((q) => ({ ...q, open: false }))}
-                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+                  onClick={() => setCreateOpen(false)}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50"
                 >
                   Close
                 </button>
               </div>
+            </div>
 
-              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div className="p-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="text-xs font-semibold text-slate-600">Route day</label>
-                  <input
-                    value={quick.route_day}
-                    onChange={(e) => setQuick((q) => ({ ...q, route_day: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  />
-                  <div className="mt-1 text-xs text-slate-500">Usually matches today ({todayName}).</div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-slate-600">Vehicle</label>
+                  <label className="block text-xs font-semibold text-gray-700">Vehicle</label>
                   <select
-                    value={quick.vehicle_id}
-                    onChange={(e) => setQuick((q) => ({ ...q, vehicle_id: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                    value={vehicleId}
+                    onChange={(e) => setVehicleId(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
                   >
-                    <option value="">— none —</option>
-                    {activeVehicles.map((v) => (
+                    <option value="">Select vehicle…</option>
+                    {(vehicles || []).map((v) => (
                       <option key={v.id} value={v.id}>
-                        {v.registration}{v.name ? ` • ${v.name}` : ""}
+                        {v.name || v.reg || v.id}
                       </option>
                     ))}
                   </select>
+                  <div className="mt-1 text-xs text-gray-500">
+                    Uses your existing vehicles table.
+                  </div>
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-slate-600">Notes</label>
-                  <input
-                    value={quick.notes}
-                    onChange={(e) => setQuick((q) => ({ ...q, notes: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                  />
-                </div>
-
-                <div className="md:col-span-3">
-                  <label className="text-xs font-semibold text-slate-600">Staff</label>
-                  <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {activeStaff.map((s) => {
-                      const checked = quick.staff_ids.includes(s.id);
-                      return (
-                        <label key={s.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() =>
-                              setQuick((q) => ({ ...q, staff_ids: toggleStaff(q.staff_ids, s.id) }))
-                            }
-                          />
-                          <span className="font-semibold text-slate-900">{s.name}</span>
-                          <span className="ml-auto text-xs text-slate-500">{s.role}</span>
-                        </label>
-                      );
-                    })}
+                  <label className="block text-xs font-semibold text-gray-700">Staff</label>
+                  <div className="mt-1 max-h-44 overflow-auto rounded-lg border border-gray-300 bg-white p-2">
+                    {(staff || []).length ? (
+                      <div className="space-y-1">
+                        {(staffByRole.drivers.length ? staffByRole.drivers : staff).map((s) => (
+                          <label
+                            key={s.id}
+                            className="flex cursor-pointer items-center justify-between rounded-md px-2 py-1 hover:bg-gray-50"
+                          >
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={staffIds.includes(s.id)}
+                                onChange={() => toggleStaff(s.id)}
+                              />
+                              <span className="text-sm text-gray-900">
+                                {s.name || s.email || s.id}
+                              </span>
+                            </div>
+                            <span className="text-xs text-gray-500">{s.role || ""}</span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-gray-600">No staff found.</div>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    Picks from staff table. (If roles exist, drivers show first.)
                   </div>
                 </div>
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={createRunQuick}
-                  disabled={busy}
-                  className={cx(
-                    "rounded-xl px-4 py-3 text-sm font-semibold shadow-sm ring-1",
-                    busy
-                      ? "bg-slate-200 text-slate-500 ring-slate-200"
-                      : "bg-black text-white ring-black hover:bg-slate-900"
-                  )}
-                >
-                  {busy ? "Creating…" : "Create run"}
-                </button>
+              {createError ? (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  {createError}
+                </div>
+              ) : null}
 
+              <div className="mt-4 flex items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setQuick((q) => ({ ...q, open: false }))}
-                  className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-slate-300 hover:bg-slate-50"
+                  onClick={() => setCreateOpen(false)}
+                  className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  disabled={creating}
                 >
                   Cancel
                 </button>
+                <button
+                  type="button"
+                  onClick={onCreateRun}
+                  className={classNames(
+                    "rounded-lg px-4 py-2 text-sm font-semibold",
+                    creating ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
+                  )}
+                  disabled={creating}
+                >
+                  {creating ? "Creating…" : "Create run"}
+                </button>
+              </div>
+
+              <div className="mt-3 text-xs text-gray-500">
+                This will create a run for today and then send you straight to the run page.
               </div>
             </div>
           </div>
-        ) : null}
-
-        <div className="mt-4 pb-10 text-xs text-slate-500">
-          Tip: Create runs from the left panel, then open them from the right.
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AlertRow({ label, value, href }) {
+  const val = Number(value || 0);
+  const isHot = val > 0;
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-gray-200 p-3">
+      <div className="text-sm font-medium text-gray-900">{label}</div>
+      <div className="flex items-center gap-3">
+        <div
+          className={classNames(
+            "rounded-lg px-2 py-1 text-sm font-semibold",
+            isHot ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"
+          )}
+        >
+          {val}
+        </div>
+        <Link
+          href={href}
+          className="text-sm font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+        >
+          View
+        </Link>
       </div>
     </div>
   );
+}
+
+export async function getServerSideProps() {
+  const supabase = getSupabaseAdmin();
+
+  const now = new Date();
+  const today = isoDate(now);
+
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const todayName = dayNames[now.getDay()];
+
+  const monday = startOfWeekMonday(now);
+  const friday = addDays(monday, 4);
+
+  const mondayIso = isoDate(monday);
+  const fridayIso = isoDate(friday);
+
+  // Pull minimal fields needed to compute today overview + alerts + planner.
+  const { data: subs, error: subsErr } = await supabase
+    .from("subscriptions")
+    .select(
+      "id,status,route_day,route_area,next_collection_date,pause_from,pause_to"
+    )
+    .gte("next_collection_date", mondayIso)
+    .lte("next_collection_date", fridayIso);
+
+  // Also fetch "today slice" for accurate paused/due counts & overdue/pending/missing_route checks.
+  const { data: subsAllForAlerts, error: subsAllErr } = await supabase
+    .from("subscriptions")
+    .select(
+      "id,status,route_day,route_area,next_collection_date,pause_from,pause_to"
+    );
+
+  const { data: vehicles } = await supabase
+    .from("vehicles")
+    .select("id,name,reg,capacity_units,active")
+    .order("name", { ascending: true });
+
+  const { data: staff } = await supabase
+    .from("staff")
+    .select("id,name,email,role,active")
+    .order("name", { ascending: true });
+
+  if (subsErr || subsAllErr) {
+    // Keep it production-safe: show dashboard with empty data rather than throwing
+    // (so Basic Auth isn't masking a 500 during ops).
+    return {
+      props: {
+        today,
+        todayName,
+        thisWeekDays: buildWeekDays(monday),
+        overviewByArea: [],
+        weekPlanner: {},
+        areas: [],
+        alerts: { overdue_active: 0, pending: 0, missing_route: 0, paused_now: 0 },
+        vehicles: vehicles || [],
+        staff: staff || [],
+        _error: subsErr?.message || subsAllErr?.message || "Failed to load subscriptions",
+      },
+    };
+  }
+
+  const weekSubs = subs || [];
+  const allSubs = subsAllForAlerts || [];
+
+  // Compute alerts
+  let overdue_active = 0;
+  let pending = 0;
+  let missing_route = 0;
+  let paused_now = 0;
+
+  for (const s of allSubs) {
+    const paused = isPausedOn(s, today);
+    if (paused) paused_now += 1;
+
+    const isActive = String(s.status || "").toLowerCase() === "active";
+    const isPending = String(s.status || "").toLowerCase() === "pending";
+    if (isPending) pending += 1;
+
+    if (!s.route_day || !s.route_area) missing_route += 1;
+
+    if (isActive && !paused && s.next_collection_date && s.next_collection_date < today) {
+      overdue_active += 1;
+    }
+  }
+
+  // Today overview grouped by route_area (only those due today)
+  const todayMap = new Map(); // key = route_area||"" + "|" + route_day||""
+  for (const s of allSubs) {
+    if (!s.next_collection_date || s.next_collection_date !== today) continue;
+
+    const key = `${s.route_area || ""}|${s.route_day || ""}`;
+    if (!todayMap.has(key)) {
+      todayMap.set(key, {
+        route_area: s.route_area || "",
+        route_day: s.route_day || "",
+        due_count: 0,
+        paused_count: 0,
+      });
+    }
+    const row = todayMap.get(key);
+
+    const paused = isPausedOn(s, today);
+    const isActive = String(s.status || "").toLowerCase() === "active";
+    if (paused) row.paused_count += 1;
+    if (isActive && !paused) row.due_count += 1;
+  }
+
+  const overviewByArea = Array.from(todayMap.values()).sort((a, b) => {
+    // Put named areas first, alphabetical
+    const aa = a.route_area || "";
+    const bb = b.route_area || "";
+    if (!aa && bb) return 1;
+    if (aa && !bb) return -1;
+    return aa.localeCompare(bb);
+  });
+
+  // Week planner: counts by date+area for ACTIVE and not paused on that day
+  const weekPlanner = {}; // date -> area -> count
+  const areaKeySet = new Set(); // build list of areas
+  for (const s of weekSubs) {
+    const date = s.next_collection_date;
+    if (!date) continue;
+
+    const isActive = String(s.status || "").toLowerCase() === "active";
+    if (!isActive) continue;
+
+    if (isPausedOn(s, date)) continue;
+
+    const area = s.route_area || "";
+    const day = s.route_day || "";
+    areaKeySet.add(`${area}|${day}`);
+
+    if (!weekPlanner[date]) weekPlanner[date] = {};
+    weekPlanner[date][area] = (weekPlanner[date][area] || 0) + 1;
+  }
+
+  // Areas list: include areas seen in week data + today overview (so the table stays useful)
+  for (const row of overviewByArea) {
+    areaKeySet.add(`${row.route_area || ""}|${row.route_day || ""}`);
+  }
+
+  const areas = Array.from(areaKeySet)
+    .map((k) => {
+      const [route_area, route_day] = k.split("|");
+      return { route_area, route_day };
+    })
+    .sort((a, b) => {
+      const aa = a.route_area || "";
+      const bb = b.route_area || "";
+      if (!aa && bb) return 1;
+      if (aa && !bb) return -1;
+      return aa.localeCompare(bb);
+    });
+
+  return {
+    props: {
+      today,
+      todayName,
+      thisWeekDays: buildWeekDays(monday),
+      overviewByArea,
+      weekPlanner,
+      areas,
+      alerts: { overdue_active, pending, missing_route, paused_now },
+      vehicles: (vehicles || []).filter((v) => v.active !== false),
+      staff: (staff || []).filter((s) => s.active !== false),
+    },
+  };
+}
+
+function buildWeekDays(mondayDate) {
+  const d0 = new Date(mondayDate);
+  const dayNamesShort = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const out = [];
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(d0);
+    d.setDate(d.getDate() + i);
+    const date = isoDate(d);
+    const dayName = dayNamesShort[d.getDay()];
+    const label = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(
+      2,
+      "0"
+    )}`;
+    out.push({ date, dayName, label });
+  }
+  return out;
 }
