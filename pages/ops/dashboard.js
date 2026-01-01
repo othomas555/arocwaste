@@ -1,24 +1,16 @@
-import React from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
-/**
- * Ops Dashboard
- * - Today overview (due today): total stops, extra bags, grouped by route_area
- * - This week planner (Mon–Fri): DATE-DRIVEN using next_collection_date (actual Mon–Fri dates)
- * - Ops alerts: active/trialing missing route_day, missing next_collection_date
- *
- * Visibility logic:
- * - Only status in: active, trialing
- */
+function cx(...classes) {
+  return classes.filter(Boolean).join(" ");
+}
 
-// ---------- date helpers (Europe/London) ----------
-const LONDON_TZ = "Europe/London";
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const WEEKDAYS_MON_FRI = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 
 function londonYMD(date = new Date()) {
-  // Returns YYYY-MM-DD in Europe/London
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: LONDON_TZ,
+    timeZone: "Europe/London",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -29,474 +21,399 @@ function londonYMD(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-function addDays(ymd, days) {
-  // ymd is YYYY-MM-DD, interpret as midnight UTC on that date, add days,
-  // then re-format back to YYYY-MM-DD in London.
-  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
+function londonWeekday(date = new Date()) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+  }).format(date);
+}
+
+function addDaysYMD(ymd, days) {
+  // Parse as UTC midnight to avoid DST surprises, then format back in London.
+  const [y, m, d] = String(ymd).split("-").map((x) => parseInt(x, 10));
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() + days);
   return londonYMD(dt);
 }
 
-function mondayOfWeek(ymd) {
-  // Get Monday (YYYY-MM-DD) for the week containing ymd, using London day-of-week.
-  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-
-  const weekday = new Intl.DateTimeFormat("en-GB", {
-    timeZone: LONDON_TZ,
-    weekday: "short",
-  }).format(dt); // "Mon" etc.
-
-  const map = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
-  const offset = map[weekday] ?? 0;
-  return addDays(ymd, -offset);
-}
-
-function weekdayNameFromYMD(ymd) {
-  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return new Intl.DateTimeFormat("en-GB", { timeZone: LONDON_TZ, weekday: "long" }).format(dt);
-}
-
-function humanDateFromYMD(ymd) {
-  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: LONDON_TZ,
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(dt);
-}
-
-function safeInt(n) {
+function safeNum(n) {
   const x = Number(n);
   return Number.isFinite(x) ? x : 0;
 }
 
-function normStr(s) {
-  return (s || "").toString().trim();
+function isActiveLike(status) {
+  return status === "active" || status === "trialing";
 }
 
-function groupBy(arr, keyFn) {
-  const out = {};
-  for (const item of arr) {
-    const k = keyFn(item);
-    if (!out[k]) out[k] = [];
-    out[k].push(item);
-  }
-  return out;
-}
+export default function OpsDashboardPage() {
+  const today = useMemo(() => londonYMD(new Date()), []);
+  const todayName = useMemo(() => londonWeekday(new Date()), []);
 
-function sortRouteAreas(a, b) {
-  const aa = normStr(a);
-  const bb = normStr(b);
-  if (!aa && bb) return 1;
-  if (aa && !bb) return -1;
-  return aa.localeCompare(bb);
-}
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-function sortRouteDays(a, b) {
-  const order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Unassigned"];
-  const ai = order.indexOf(a);
-  const bi = order.indexOf(b);
-  if (ai === -1 && bi === -1) return a.localeCompare(b);
-  if (ai === -1) return 1;
-  if (bi === -1) return -1;
-  return ai - bi;
-}
+  const [subs, setSubs] = useState([]);
+  const [runsToday, setRunsToday] = useState([]);
 
-const WEEKDAY_OFFSETS_MON_FRI = [
-  { name: "Monday", offset: 0 },
-  { name: "Tuesday", offset: 1 },
-  { name: "Wednesday", offset: 2 },
-  { name: "Thursday", offset: 3 },
-  { name: "Friday", offset: 4 },
-];
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const [rSubs, rRuns] = await Promise.all([
+        fetch("/api/ops/subscribers"),
+        fetch(`/api/ops/daily-runs?date=${encodeURIComponent(today)}`),
+      ]);
 
-export async function getServerSideProps() {
-  const supabase = getSupabaseAdmin();
+      const jSubs = await rSubs.json();
+      const jRuns = await rRuns.json();
 
-  const { data, error } = await supabase
-    .from("subscriptions")
-    .select(
-      "id,status,name,email,phone,postcode,address,frequency,extra_bags,use_own_bin,route_day,route_area,next_collection_date,anchor_date,pause_from,pause_to,ops_notes,created_at,updated_at"
-    )
-    .in("status", ["active", "trialing"]);
+      if (!rSubs.ok) throw new Error(jSubs?.error || "Failed to load subscribers");
+      if (!rRuns.ok) throw new Error(jRuns?.error || "Failed to load daily runs");
 
-  const todayYMD = londonYMD();
-  const weekStartYMD = mondayOfWeek(todayYMD);
-  const weekEndYMD = addDays(weekStartYMD, 6);
-
-  const weekDaysMonFri = WEEKDAY_OFFSETS_MON_FRI.map((w) => {
-    const dateYMD = addDays(weekStartYMD, w.offset);
-    return {
-      weekday: weekdayNameFromYMD(dateYMD),
-      dateYMD,
-      dateHuman: humanDateFromYMD(dateYMD),
-    };
-  });
-
-  if (error) {
-    return {
-      props: {
-        todayYMD,
-        weekStartYMD,
-        weekEndYMD,
-        weekDaysMonFri,
-        today: { totalStops: 0, extraBags: 0, byRouteArea: [] },
-        week: { byDate: [] },
-        alerts: {
-          missingRouteDay: { count: 0, sample: [] },
-          missingNextCollectionDate: { count: 0, sample: [] },
-        },
-        loadError: error.message || "Unknown error loading subscriptions",
-      },
-    };
+      setSubs(Array.isArray(jSubs?.subscribers) ? jSubs.subscribers : []);
+      setRunsToday(Array.isArray(jRuns?.runs) ? jRuns.runs : []);
+    } catch (e) {
+      setError(e.message || "Load failed");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const subs = Array.isArray(data) ? data : [];
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ---- Today overview (due today) ----
-  const dueToday = subs.filter((s) => normStr(s.next_collection_date) === todayYMD);
+  // ---------- TODAY OVERVIEW (from subscriptions due today) ----------
+  const todayDue = useMemo(() => {
+    return subs
+      .filter((s) => isActiveLike(s.status))
+      .filter((s) => String(s.next_collection_date || "") === today);
+  }, [subs, today]);
 
-  const todayTotalStops = dueToday.length;
-  const todayExtraBags = dueToday.reduce((sum, s) => sum + safeInt(s.extra_bags), 0);
+  const todayTotals = useMemo(() => {
+    const totalStops = todayDue.length;
+    const extraBags = todayDue.reduce((sum, s) => sum + safeNum(s.extra_bags), 0);
+    return { totalStops, extraBags };
+  }, [todayDue]);
 
-  const todayByArea = groupBy(dueToday, (s) => normStr(s.route_area) || "Unassigned");
-  const todayByAreaRows = Object.keys(todayByArea)
-    .sort(sortRouteAreas)
-    .map((area) => {
-      const items = todayByArea[area] || [];
-      const stops = items.length;
-      const extraBags = items.reduce((sum, s) => sum + safeInt(s.extra_bags), 0);
-      return { route_area: area, stops, extraBags };
+  const todayByArea = useMemo(() => {
+    const map = new Map();
+    for (const s of todayDue) {
+      const area = (s.route_area || "Unassigned area").toString().trim() || "Unassigned area";
+      const cur = map.get(area) || { area, stops: 0, extraBags: 0 };
+      cur.stops += 1;
+      cur.extraBags += safeNum(s.extra_bags);
+      map.set(area, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => b.stops - a.stops);
+  }, [todayDue]);
+
+  // ---------- THIS WEEK PLANNER (Mon–Fri counts by date and grouped by route_day) ----------
+  const weekDates = useMemo(() => {
+    // show next Mon–Fri based on calendar from today (not “week commencing” logic).
+    // If today is Sat/Sun, this will still show Mon–Fri ahead.
+    const out = [];
+    for (let i = 0; i < 10; i++) {
+      const d = addDaysYMD(today, i);
+      const name = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/London",
+        weekday: "long",
+      }).format(new Date(d + "T00:00:00Z"));
+      if (WEEKDAYS_MON_FRI.includes(name)) out.push({ ymd: d, weekday: name });
+      if (out.length === 5) break;
+    }
+    return out;
+  }, [today]);
+
+  const weekPlanner = useMemo(() => {
+    // For each date, count due stops grouped by route_day
+    const active = subs.filter((s) => isActiveLike(s.status));
+    const results = weekDates.map(({ ymd, weekday }) => {
+      const due = active.filter((s) => String(s.next_collection_date || "") === ymd);
+
+      const byRouteDay = new Map();
+      for (const s of due) {
+        const rd = (s.route_day || "Missing route_day").toString().trim() || "Missing route_day";
+        const cur = byRouteDay.get(rd) || { route_day: rd, stops: 0 };
+        cur.stops += 1;
+        byRouteDay.set(rd, cur);
+      }
+
+      return {
+        ymd,
+        weekday,
+        totalStops: due.length,
+        groups: Array.from(byRouteDay.values()).sort((a, b) => b.stops - a.stops),
+      };
     });
 
-  // ---- Week planner (DATE-DRIVEN Mon–Fri) ----
-  // Primary truth = next_collection_date. For each Mon–Fri date in THIS week:
-  // show stops where next_collection_date == that date.
-  const byDate = weekDaysMonFri.map((wd) => {
-    const dateItems = subs.filter((s) => normStr(s.next_collection_date) === wd.dateYMD);
+    return results;
+  }, [subs, weekDates]);
 
-    const totalStops = dateItems.length;
-    const extraBags = dateItems.reduce((sum, s) => sum + safeInt(s.extra_bags), 0);
-
-    const byArea = groupBy(dateItems, (s) => normStr(s.route_area) || "Unassigned");
-    const byAreaRows = Object.keys(byArea)
-      .sort(sortRouteAreas)
-      .map((area) => ({ route_area: area, stops: (byArea[area] || []).length }));
-
-    // Useful sanity check: what route_days are present on this date (if any)
-    const byDay = groupBy(dateItems, (s) => normStr(s.route_day) || "Unassigned");
-    const byDayRows = Object.keys(byDay)
-      .sort(sortRouteDays)
-      .map((day) => ({ route_day: day, stops: (byDay[day] || []).length }));
+  // ---------- OPS ALERTS ----------
+  const alerts = useMemo(() => {
+    const active = subs.filter((s) => isActiveLike(s.status));
+    const missingRouteDay = active.filter((s) => !(s.route_day || "").toString().trim());
+    const missingNextDate = active.filter((s) => !(s.next_collection_date || "").toString().trim());
+    const missingArea = active.filter((s) => !(s.route_area || "").toString().trim());
 
     return {
-      weekday: wd.weekday,
-      dateYMD: wd.dateYMD,
-      dateHuman: wd.dateHuman,
-      totalStops,
-      extraBags,
-      byRouteArea: byAreaRows,
-      byRouteDay: byDayRows,
+      missingRouteDay,
+      missingNextDate,
+      missingArea,
     };
-  });
+  }, [subs]);
 
-  // ---- Alerts ----
-  const missingRouteDay = subs.filter((s) => !normStr(s.route_day));
-  const missingNextCollectionDate = subs.filter((s) => !normStr(s.next_collection_date));
+  // ---------- RUNS TODAY ----------
+  const runsTodayCards = useMemo(() => {
+    return (runsToday || [])
+      .slice()
+      .sort((a, b) => String(a.route_area || "").localeCompare(String(b.route_area || "")))
+      .map((r) => {
+        const staffNames = Array.isArray(r.daily_run_staff)
+          ? r.daily_run_staff.map((x) => x.staff?.name).filter(Boolean).join(", ")
+          : "";
+        const vehicleLabel = r.vehicles
+          ? `${r.vehicles.registration}${r.vehicles.name ? ` • ${r.vehicles.name}` : ""}`
+          : "— no vehicle —";
+        return {
+          id: r.id,
+          route_area: r.route_area,
+          route_day: r.route_day,
+          vehicleLabel,
+          staffNames,
+          notes: r.notes || "",
+        };
+      });
+  }, [runsToday]);
 
-  const slim = (s) => ({
-    id: s.id,
-    name: normStr(s.name) || "(No name)",
-    postcode: normStr(s.postcode),
-    route_area: normStr(s.route_area),
-    route_day: normStr(s.route_day),
-    next_collection_date: normStr(s.next_collection_date),
-    status: normStr(s.status),
-  });
-
-  return {
-    props: {
-      todayYMD,
-      weekStartYMD,
-      weekEndYMD,
-      weekDaysMonFri,
-      today: {
-        totalStops: todayTotalStops,
-        extraBags: todayExtraBags,
-        byRouteArea: todayByAreaRows,
-      },
-      week: { byDate },
-      alerts: {
-        missingRouteDay: {
-          count: missingRouteDay.length,
-          sample: missingRouteDay.slice(0, 25).map(slim),
-        },
-        missingNextCollectionDate: {
-          count: missingNextCollectionDate.length,
-          sample: missingNextCollectionDate.slice(0, 25).map(slim),
-        },
-      },
-      loadError: null,
-    },
-  };
-}
-
-function StatCard({ title, value, sub }) {
+  // ---------- UI ----------
   return (
-    <div className="rounded-xl border bg-white p-4 shadow-sm">
-      <div className="text-sm text-gray-600">{title}</div>
-      <div className="mt-1 text-2xl font-semibold">{value}</div>
-      {sub ? <div className="mt-1 text-xs text-gray-500">{sub}</div> : null}
-    </div>
-  );
-}
-
-function Table({ columns, rows, emptyText = "No data" }) {
-  return (
-    <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
-      <table className="w-full text-sm">
-        <thead className="bg-gray-50 text-left">
-          <tr>
-            {columns.map((c) => (
-              <th key={c.key} className="px-3 py-2 font-medium text-gray-700">
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
-            <tr>
-              <td className="px-3 py-3 text-gray-500" colSpan={columns.length}>
-                {emptyText}
-              </td>
-            </tr>
-          ) : (
-            rows.map((r, idx) => (
-              <tr key={idx} className="border-t">
-                {columns.map((c) => (
-                  <td key={c.key} className="px-3 py-2 text-gray-800">
-                    {r[c.key]}
-                  </td>
-                ))}
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function MiniList({ items }) {
-  return (
-    <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
-      <div className="max-h-[360px] overflow-auto">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-gray-50 text-left">
-            <tr>
-              <th className="px-3 py-2 font-medium text-gray-700">Name</th>
-              <th className="px-3 py-2 font-medium text-gray-700">Postcode</th>
-              <th className="px-3 py-2 font-medium text-gray-700">Route</th>
-              <th className="px-3 py-2 font-medium text-gray-700">Next</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr>
-                <td className="px-3 py-3 text-gray-500" colSpan={4}>
-                  None 🎉
-                </td>
-              </tr>
-            ) : (
-              items.map((s) => (
-                <tr key={s.id} className="border-t">
-                  <td className="px-3 py-2">{s.name}</td>
-                  <td className="px-3 py-2">{s.postcode}</td>
-                  <td className="px-3 py-2">
-                    {(s.route_day || "—") + " / " + (s.route_area || "—")}
-                  </td>
-                  <td className="px-3 py-2">{s.next_collection_date || "—"}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-export default function OpsDashboardPage(props) {
-  const { todayYMD, weekStartYMD, weekEndYMD, today, week, alerts, loadError } = props;
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-6xl px-4 py-6">
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto max-w-6xl px-3 py-4">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold">Ops Dashboard</h1>
-            <p className="mt-1 text-sm text-gray-600">
-              Active + trialing only • Today: <span className="font-medium">{todayYMD}</span> •
-              Week: <span className="font-medium">{weekStartYMD}</span> →{" "}
-              <span className="font-medium">{weekEndYMD}</span>
+            <h1 className="text-xl font-semibold text-slate-900">Ops • Dashboard</h1>
+            <p className="text-sm text-slate-600">
+              {todayName} • {today}
             </p>
           </div>
 
-          <div className="flex gap-2">
-            <Link
-              href="/ops/today"
-              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
-            >
-              Ops Today
-            </Link>
-            <Link
-              href="/ops/subscribers"
-              className="rounded-lg border bg-white px-3 py-2 text-sm shadow-sm hover:bg-gray-50"
-            >
+          <div className="flex flex-wrap gap-2">
+            <Link href="/ops/subscribers" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
               Subscribers
             </Link>
+            <Link href="/ops/today" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Today list
+            </Link>
+            <Link href="/ops/daily-runs" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Daily runs
+            </Link>
+            <Link href="/ops/staff" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Staff
+            </Link>
+            <Link href="/ops/vehicles" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Vehicles
+            </Link>
+            <button
+              type="button"
+              onClick={load}
+              className="rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-900"
+            >
+              Refresh
+            </button>
           </div>
         </div>
 
-        {loadError ? (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-            <div className="font-semibold">Dashboard failed to load</div>
-            <div className="mt-1">{loadError}</div>
-          </div>
+        {error ? (
+          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
         ) : null}
 
-        {/* Today overview */}
-        <div className="mb-6">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Today overview</h2>
+        {/* Top KPI cards */}
+        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="text-xs font-semibold text-slate-600">Today stops</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">
+              {loading ? "…" : todayTotals.totalStops}
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <StatCard title="Total stops due today" value={today.totalStops} />
-            <StatCard title="Extra bags due today" value={today.extraBags} />
-            <StatCard
-              title="Routes due today"
-              value={today.byRouteArea.length}
-              sub="Grouped by route_area"
-            />
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="text-xs font-semibold text-slate-600">Today extra bags</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">
+              {loading ? "…" : todayTotals.extraBags}
+            </div>
           </div>
 
-          <div className="mt-4">
-            <Table
-              columns={[
-                { key: "route_area", label: "Route area" },
-                { key: "stops", label: "Stops" },
-                { key: "extraBags", label: "Extra bags" },
-              ]}
-              rows={today.byRouteArea}
-              emptyText="No collections due today."
-            />
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="text-xs font-semibold text-slate-600">Ops alerts</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">
+              {loading ? "…" : alerts.missingRouteDay.length + alerts.missingNextDate.length}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              active/trialing missing route_day or next_collection_date
+            </div>
           </div>
         </div>
 
-        {/* This week planner - DATE DRIVEN */}
-        <div className="mb-6">
-          <h2 className="text-lg font-semibold">This week planner (Mon–Fri)</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Date-driven from <span className="font-medium">next_collection_date</span>. Route fields are shown as
-            breakdowns (useful for spotting bad route assignments).
-          </p>
+        {/* Two-column section */}
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {/* Today overview */}
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-slate-900">Today overview</div>
+              <Link href="/ops/today" className="text-sm font-semibold text-slate-900 underline">
+                Open today list
+              </Link>
+            </div>
 
-          <div className="mt-4 space-y-3">
-            {week.byDate.map((d) => (
-              <div key={d.dateYMD} className="rounded-xl border bg-white p-4 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="text-base font-semibold">
-                      {d.weekday} <span className="text-gray-500">•</span>{" "}
-                      <span className="font-normal text-gray-700">{d.dateHuman}</span>
+            {loading ? (
+              <div className="text-sm text-slate-600">Loading…</div>
+            ) : todayByArea.length === 0 ? (
+              <div className="text-sm text-slate-700">No due stops today.</div>
+            ) : (
+              <div className="space-y-2">
+                {todayByArea.map((g) => (
+                  <div key={g.area} className="flex items-center justify-between rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900">{g.area}</div>
+                      <div className="text-xs text-slate-600">
+                        Extra bags: <span className="font-semibold text-slate-800">{g.extraBags}</span>
+                      </div>
                     </div>
-                    <div className="mt-1 text-xs text-gray-500">Date: {d.dateYMD}</div>
+                    <div className="text-lg font-semibold text-slate-900">{g.stops}</div>
                   </div>
-
-                  <div className="flex gap-3 text-sm text-gray-700">
-                    <span>
-                      Stops: <span className="font-semibold">{d.totalStops}</span>
-                    </span>
-                    <span>
-                      Extra bags: <span className="font-semibold">{d.extraBags}</span>
-                    </span>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-                  <div>
-                    <div className="mb-2 text-sm font-semibold text-gray-800">By route_area</div>
-                    <Table
-                      columns={[
-                        { key: "route_area", label: "Route area" },
-                        { key: "stops", label: "Stops" },
-                      ]}
-                      rows={d.byRouteArea}
-                      emptyText="No stops planned for this date."
-                    />
-                  </div>
-
-                  <div>
-                    <div className="mb-2 text-sm font-semibold text-gray-800">By route_day (sanity check)</div>
-                    <Table
-                      columns={[
-                        { key: "route_day", label: "Route day" },
-                        { key: "stops", label: "Stops" },
-                      ]}
-                      rows={d.byRouteDay}
-                      emptyText="No stops planned for this date."
-                    />
-                  </div>
-                </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
+
+          {/* Today's runs */}
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-slate-900">Today’s runs</div>
+              <Link href="/ops/daily-runs" className="text-sm font-semibold text-slate-900 underline">
+                Manage runs
+              </Link>
+            </div>
+
+            {loading ? (
+              <div className="text-sm text-slate-600">Loading…</div>
+            ) : runsTodayCards.length === 0 ? (
+              <div className="text-sm text-slate-700">
+                No runs created for today yet. Create them in <span className="font-semibold">Daily runs</span>.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {runsTodayCards.map((r) => (
+                  <Link
+                    key={r.id}
+                    href={`/ops/run/${r.id}`}
+                    className="block rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200 hover:bg-slate-100"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-slate-900">
+                          {r.route_area} • {r.route_day}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-600">
+                          {r.vehicleLabel}
+                          <span className="mx-2 text-slate-300">•</span>
+                          {r.staffNames || "No staff assigned"}
+                        </div>
+                        {r.notes ? <div className="mt-1 text-xs text-slate-500">{r.notes}</div> : null}
+                      </div>
+                      <div className="shrink-0 text-sm font-semibold text-slate-700">Open</div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Week planner */}
+        <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div className="mb-2 text-sm font-semibold text-slate-900">This week planner (Mon–Fri)</div>
+
+          {loading ? (
+            <div className="text-sm text-slate-600">Loading…</div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+              {weekPlanner.map((d) => (
+                <div key={d.ymd} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">{d.weekday}</div>
+                  <div className="text-xs text-slate-500">{d.ymd}</div>
+                  <div className="mt-2 text-lg font-semibold text-slate-900">{d.totalStops}</div>
+                  <div className="mt-2 space-y-1">
+                    {d.groups.length === 0 ? (
+                      <div className="text-xs text-slate-500">No due stops</div>
+                    ) : (
+                      d.groups.slice(0, 4).map((g) => (
+                        <div key={g.route_day} className="flex items-center justify-between text-xs text-slate-700">
+                          <span className="truncate">{g.route_day}</span>
+                          <span className="font-semibold">{g.stops}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Alerts */}
-        <div className="mb-10">
-          <h2 className="text-lg font-semibold">Ops alerts</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            These will block clean ops planning. Fix them in <span className="font-medium">/ops/subscribers</span>.
-          </p>
+        <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div className="mb-2 text-sm font-semibold text-slate-900">Ops alerts</div>
 
-          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="font-semibold">
-                  Missing <span className="font-mono">route_day</span>
-                </div>
-                <div className="text-sm text-gray-700">
-                  Count: <span className="font-semibold">{alerts.missingRouteDay.count}</span>
-                </div>
+          {loading ? (
+            <div className="text-sm text-slate-600">Loading…</div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                <div className="text-xs font-semibold text-slate-600">Active missing route_day</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingRouteDay.length}</div>
+                {alerts.missingRouteDay.length ? (
+                  <div className="mt-2 text-xs text-slate-600">
+                    Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-xs text-slate-500">All good</div>
+                )}
               </div>
-              <MiniList items={alerts.missingRouteDay.sample} />
-            </div>
 
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="font-semibold">
-                  Missing <span className="font-mono">next_collection_date</span>
-                </div>
-                <div className="text-sm text-gray-700">
-                  Count: <span className="font-semibold">{alerts.missingNextCollectionDate.count}</span>
-                </div>
+              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                <div className="text-xs font-semibold text-slate-600">Active missing next_collection_date</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingNextDate.length}</div>
+                {alerts.missingNextDate.length ? (
+                  <div className="mt-2 text-xs text-slate-600">
+                    Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-xs text-slate-500">All good</div>
+                )}
               </div>
-              <MiniList items={alerts.missingNextCollectionDate.sample} />
+
+              <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                <div className="text-xs font-semibold text-slate-600">Active missing route_area</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">{alerts.missingArea.length}</div>
+                {alerts.missingArea.length ? (
+                  <div className="mt-2 text-xs text-slate-600">
+                    Fix in <Link className="font-semibold underline" href="/ops/subscribers">Subscribers</Link>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-xs text-slate-500">All good</div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
-        <div className="text-xs text-gray-500">
-          Note: This dashboard intentionally matches ops visibility rules:{" "}
-          <span className="font-medium">active</span> + <span className="font-medium">trialing</span> only.
+        {/* Footer quick links */}
+        <div className="mt-4 pb-10 text-xs text-slate-500">
+          Tip: Put this page as your ops homepage bookmark. Everything important should be reachable from here.
         </div>
       </div>
     </div>
