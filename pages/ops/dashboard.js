@@ -5,10 +5,10 @@ import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 /**
  * Ops Dashboard
  * - Today overview (due today): total stops, extra bags, grouped by route_area
- * - This week planner (Mon–Fri): stops per day (by route_day), with route_area breakdown
+ * - This week planner (Mon–Fri): DATE-DRIVEN using next_collection_date (actual Mon–Fri dates)
  * - Ops alerts: active/trialing missing route_day, missing next_collection_date
  *
- * Uses existing logic:
+ * Visibility logic:
  * - Only status in: active, trialing
  */
 
@@ -30,8 +30,8 @@ function londonYMD(date = new Date()) {
 }
 
 function addDays(ymd, days) {
-  // ymd is YYYY-MM-DD, interpret as midnight London, then add days, return YYYY-MM-DD (London)
-  // We avoid timezone drift by operating in UTC on a date-only string and re-formatting for London.
+  // ymd is YYYY-MM-DD, interpret as midnight UTC on that date, add days,
+  // then re-format back to YYYY-MM-DD in London.
   const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() + days);
@@ -43,15 +43,31 @@ function mondayOfWeek(ymd) {
   const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
   const dt = new Date(Date.UTC(y, m - 1, d));
 
-  // Determine day-of-week in London for this date
   const weekday = new Intl.DateTimeFormat("en-GB", {
     timeZone: LONDON_TZ,
     weekday: "short",
-  }).format(dt); // e.g. "Mon"
+  }).format(dt); // "Mon" etc.
 
   const map = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
   const offset = map[weekday] ?? 0;
   return addDays(ymd, -offset);
+}
+
+function weekdayNameFromYMD(ymd) {
+  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return new Intl.DateTimeFormat("en-GB", { timeZone: LONDON_TZ, weekday: "long" }).format(dt);
+}
+
+function humanDateFromYMD(ymd) {
+  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: LONDON_TZ,
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(dt);
 }
 
 function safeInt(n) {
@@ -74,7 +90,6 @@ function groupBy(arr, keyFn) {
 }
 
 function sortRouteAreas(a, b) {
-  // keep blanks last, else alpha
   const aa = normStr(a);
   const bb = normStr(b);
   if (!aa && bb) return 1;
@@ -82,12 +97,27 @@ function sortRouteAreas(a, b) {
   return aa.localeCompare(bb);
 }
 
-const WEEKDAYS_MON_FRI = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+function sortRouteDays(a, b) {
+  const order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Unassigned"];
+  const ai = order.indexOf(a);
+  const bi = order.indexOf(b);
+  if (ai === -1 && bi === -1) return a.localeCompare(b);
+  if (ai === -1) return 1;
+  if (bi === -1) return -1;
+  return ai - bi;
+}
+
+const WEEKDAY_OFFSETS_MON_FRI = [
+  { name: "Monday", offset: 0 },
+  { name: "Tuesday", offset: 1 },
+  { name: "Wednesday", offset: 2 },
+  { name: "Thursday", offset: 3 },
+  { name: "Friday", offset: 4 },
+];
 
 export async function getServerSideProps() {
   const supabase = getSupabaseAdmin();
 
-  // Pull only fields needed for dashboard calculations
   const { data, error } = await supabase
     .from("subscriptions")
     .select(
@@ -95,20 +125,28 @@ export async function getServerSideProps() {
     )
     .in("status", ["active", "trialing"]);
 
+  const todayYMD = londonYMD();
+  const weekStartYMD = mondayOfWeek(todayYMD);
+  const weekEndYMD = addDays(weekStartYMD, 6);
+
+  const weekDaysMonFri = WEEKDAY_OFFSETS_MON_FRI.map((w) => {
+    const dateYMD = addDays(weekStartYMD, w.offset);
+    return {
+      weekday: weekdayNameFromYMD(dateYMD),
+      dateYMD,
+      dateHuman: humanDateFromYMD(dateYMD),
+    };
+  });
+
   if (error) {
     return {
       props: {
-        todayYMD: londonYMD(),
-        weekStartYMD: mondayOfWeek(londonYMD()),
-        weekDays: WEEKDAYS_MON_FRI.map((d) => ({ day: d, date: "" })),
-        today: {
-          totalStops: 0,
-          extraBags: 0,
-          byRouteArea: [],
-        },
-        week: {
-          byRouteDay: [],
-        },
+        todayYMD,
+        weekStartYMD,
+        weekEndYMD,
+        weekDaysMonFri,
+        today: { totalStops: 0, extraBags: 0, byRouteArea: [] },
+        week: { byDate: [] },
         alerts: {
           missingRouteDay: { count: 0, sample: [] },
           missingNextCollectionDate: { count: 0, sample: [] },
@@ -119,10 +157,6 @@ export async function getServerSideProps() {
   }
 
   const subs = Array.isArray(data) ? data : [];
-
-  const todayYMD = londonYMD();
-  const weekStartYMD = mondayOfWeek(todayYMD);
-  const weekEndYMD = addDays(weekStartYMD, 6);
 
   // ---- Today overview (due today) ----
   const dueToday = subs.filter((s) => normStr(s.next_collection_date) === todayYMD);
@@ -140,29 +174,35 @@ export async function getServerSideProps() {
       return { route_area: area, stops, extraBags };
     });
 
-  // ---- Week planner (Mon–Fri) ----
-  // We interpret "This week planner" as: for each weekday Mon–Fri,
-  // count subscriptions whose route_day == that weekday AND whose next_collection_date is within this week.
-  const inThisWeek = subs.filter((s) => {
-    const d = normStr(s.next_collection_date);
-    if (!d) return false;
-    return d >= weekStartYMD && d <= weekEndYMD;
-  });
+  // ---- Week planner (DATE-DRIVEN Mon–Fri) ----
+  // Primary truth = next_collection_date. For each Mon–Fri date in THIS week:
+  // show stops where next_collection_date == that date.
+  const byDate = weekDaysMonFri.map((wd) => {
+    const dateItems = subs.filter((s) => normStr(s.next_collection_date) === wd.dateYMD);
 
-  const weekByRouteDay = WEEKDAYS_MON_FRI.map((dayName) => {
-    const dayItems = inThisWeek.filter((s) => normStr(s.route_day) === dayName);
-    const totalStops = dayItems.length;
-    const extraBags = dayItems.reduce((sum, s) => sum + safeInt(s.extra_bags), 0);
+    const totalStops = dateItems.length;
+    const extraBags = dateItems.reduce((sum, s) => sum + safeInt(s.extra_bags), 0);
 
-    const byArea = groupBy(dayItems, (s) => normStr(s.route_area) || "Unassigned");
+    const byArea = groupBy(dateItems, (s) => normStr(s.route_area) || "Unassigned");
     const byAreaRows = Object.keys(byArea)
       .sort(sortRouteAreas)
-      .map((area) => {
-        const items = byArea[area] || [];
-        return { route_area: area, stops: items.length };
-      });
+      .map((area) => ({ route_area: area, stops: (byArea[area] || []).length }));
 
-    return { route_day: dayName, totalStops, extraBags, byRouteArea: byAreaRows };
+    // Useful sanity check: what route_days are present on this date (if any)
+    const byDay = groupBy(dateItems, (s) => normStr(s.route_day) || "Unassigned");
+    const byDayRows = Object.keys(byDay)
+      .sort(sortRouteDays)
+      .map((day) => ({ route_day: day, stops: (byDay[day] || []).length }));
+
+    return {
+      weekday: wd.weekday,
+      dateYMD: wd.dateYMD,
+      dateHuman: wd.dateHuman,
+      totalStops,
+      extraBags,
+      byRouteArea: byAreaRows,
+      byRouteDay: byDayRows,
+    };
   });
 
   // ---- Alerts ----
@@ -184,14 +224,13 @@ export async function getServerSideProps() {
       todayYMD,
       weekStartYMD,
       weekEndYMD,
+      weekDaysMonFri,
       today: {
         totalStops: todayTotalStops,
         extraBags: todayExtraBags,
         byRouteArea: todayByAreaRows,
       },
-      week: {
-        byRouteDay: weekByRouteDay,
-      },
+      week: { byDate },
       alerts: {
         missingRouteDay: {
           count: missingRouteDay.length,
@@ -361,19 +400,26 @@ export default function OpsDashboardPage(props) {
           </div>
         </div>
 
-        {/* This week planner */}
+        {/* This week planner - DATE DRIVEN */}
         <div className="mb-6">
           <h2 className="text-lg font-semibold">This week planner (Mon–Fri)</h2>
           <p className="mt-1 text-sm text-gray-600">
-            Shows active/trialing where <span className="font-medium">route_day</span> matches the weekday
-            and <span className="font-medium">next_collection_date</span> is within this week.
+            Date-driven from <span className="font-medium">next_collection_date</span>. Route fields are shown as
+            breakdowns (useful for spotting bad route assignments).
           </p>
 
           <div className="mt-4 space-y-3">
-            {week.byRouteDay.map((d) => (
-              <div key={d.route_day} className="rounded-xl border bg-white p-4 shadow-sm">
+            {week.byDate.map((d) => (
+              <div key={d.dateYMD} className="rounded-xl border bg-white p-4 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-base font-semibold">{d.route_day}</div>
+                  <div>
+                    <div className="text-base font-semibold">
+                      {d.weekday} <span className="text-gray-500">•</span>{" "}
+                      <span className="font-normal text-gray-700">{d.dateHuman}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">Date: {d.dateYMD}</div>
+                  </div>
+
                   <div className="flex gap-3 text-sm text-gray-700">
                     <span>
                       Stops: <span className="font-semibold">{d.totalStops}</span>
@@ -384,15 +430,30 @@ export default function OpsDashboardPage(props) {
                   </div>
                 </div>
 
-                <div className="mt-3">
-                  <Table
-                    columns={[
-                      { key: "route_area", label: "Route area" },
-                      { key: "stops", label: "Stops" },
-                    ]}
-                    rows={d.byRouteArea}
-                    emptyText="No stops planned for this day."
-                  />
+                <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div>
+                    <div className="mb-2 text-sm font-semibold text-gray-800">By route_area</div>
+                    <Table
+                      columns={[
+                        { key: "route_area", label: "Route area" },
+                        { key: "stops", label: "Stops" },
+                      ]}
+                      rows={d.byRouteArea}
+                      emptyText="No stops planned for this date."
+                    />
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-sm font-semibold text-gray-800">By route_day (sanity check)</div>
+                    <Table
+                      columns={[
+                        { key: "route_day", label: "Route day" },
+                        { key: "stops", label: "Stops" },
+                      ]}
+                      rows={d.byRouteDay}
+                      emptyText="No stops planned for this date."
+                    />
+                  </div>
                 </div>
               </div>
             ))}
@@ -434,7 +495,7 @@ export default function OpsDashboardPage(props) {
         </div>
 
         <div className="text-xs text-gray-500">
-          Note: This dashboard intentionally uses the same visibility logic as ops runs:{" "}
+          Note: This dashboard intentionally matches ops visibility rules:{" "}
           <span className="font-medium">active</span> + <span className="font-medium">trialing</span> only.
         </div>
       </div>
