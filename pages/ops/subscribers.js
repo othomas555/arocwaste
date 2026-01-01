@@ -31,9 +31,24 @@ export default function OpsSubscribersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [open, setOpen] = useState(false);
-  const [activeRow, setActiveRow] = useState(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const [form, setForm] = useState({
+    id: "",
+    postcode: "",
+    address: "",
+    frequency: "",
+    extra_bags: 0,
+    use_own_bin: false,
+    route_day: "",
+    route_area: "",
+    next_collection_date: "",
+    pause_from: "",
+    pause_to: "",
+    status: "",
+    ops_notes: "",
+  });
 
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -51,6 +66,7 @@ export default function OpsSubscribersPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to load subscribers");
+
       setRows(Array.isArray(data?.subscribers) ? data.subscribers : []);
     } catch (e) {
       setError(e.message || "Something went wrong");
@@ -74,36 +90,31 @@ export default function OpsSubscribersPage() {
   }, [rows]);
 
   function openEditor(r) {
-    setActiveRow({
+    setForm({
       id: r.id,
-      name: r.name || "",
       postcode: r.postcode || "",
       address: r.address || "",
-      email: r.email || "",
-      phone: r.phone || "",
       frequency: r.frequency || "",
-      extra_bags: r.extra_bags || 0,
+      extra_bags: Number(r.extra_bags) || 0,
       use_own_bin: !!r.use_own_bin,
       route_day: r.route_day || "",
       route_area: r.route_area || "",
-      driver_id: r.driver_id || "",
-      route_id: r.route_id || "",
       next_collection_date: r.next_collection_date || "",
       pause_from: r.pause_from || "",
       pause_to: r.pause_to || "",
       status: r.status || "",
       ops_notes: r.ops_notes || "",
     });
-    setOpen(true);
+    setDrawerOpen(true);
   }
 
   function closeEditor() {
-    setOpen(false);
-    setActiveRow(null);
+    setDrawerOpen(false);
+    // keep form as-is
   }
 
   async function save() {
-    if (!activeRow?.id) return;
+    if (!form.id) return;
     setSaving(true);
     setError("");
     try {
@@ -111,25 +122,22 @@ export default function OpsSubscribersPage() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: activeRow.id,
-          status: activeRow.status || null,
-          route_day: activeRow.route_day || null,
-          route_area: activeRow.route_area || null,
-          driver_id: activeRow.driver_id || null,
-          route_id: activeRow.route_id || null,
-          next_collection_date: activeRow.next_collection_date || null,
-          pause_from: activeRow.pause_from || null,
-          pause_to: activeRow.pause_to || null,
-          ops_notes: activeRow.ops_notes || null,
+          id: form.id,
+          status: form.status || null,
+          route_day: form.route_day || null,
+          route_area: form.route_area || null,
+          next_collection_date: form.next_collection_date || null,
+          pause_from: form.pause_from || null,
+          pause_to: form.pause_to || null,
+          ops_notes: form.ops_notes || null,
         }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save subscriber");
 
+      setDrawerOpen(false);
       setRefreshKey((k) => k + 1);
-      setOpen(false);
-      setActiveRow(null);
     } catch (e) {
       setError(e.message || "Something went wrong");
     } finally {
@@ -143,7 +151,7 @@ export default function OpsSubscribersPage() {
         <div className="mb-4">
           <h1 className="text-xl font-semibold text-slate-900">Ops • Subscribers</h1>
           <p className="text-sm text-slate-600">
-            Set route day/area, next collection date, and hold accounts if unpaid.
+            Assign route days/areas, set next collection dates, and put accounts on hold if unpaid.
           </p>
         </div>
 
@@ -170,7 +178,6 @@ export default function OpsSubscribersPage() {
               placeholder="Search name, postcode, address, email, route area…"
               className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-200"
             />
-
             <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
@@ -182,7 +189,6 @@ export default function OpsSubscribersPage() {
                 </option>
               ))}
             </select>
-
             <button
               type="button"
               onClick={() => setRefreshKey((k) => k + 1)}
@@ -246,15 +252,12 @@ export default function OpsSubscribersPage() {
                       >
                         {r.status || "status?"}
                       </span>
-
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         {r.frequency || "frequency?"}
                       </span>
-
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         Extra bags: {Number(r.extra_bags) || 0}
                       </span>
-
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                         Next: {r.next_collection_date || "—"}
                       </span>
@@ -269,16 +272,20 @@ export default function OpsSubscribersPage() {
         )}
       </div>
 
-      {/* Editor Drawer */}
-      {open && activeRow ? (
+      {drawerOpen ? (
         <div className="fixed inset-0 z-50">
-          <div className="absolute inset-0 bg-black/30" onClick={closeEditor} />
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/30"
+            onClick={closeEditor}
+            aria-label="Close"
+          />
           <div className="absolute inset-x-0 bottom-0 mx-auto max-w-5xl rounded-t-3xl bg-white p-4 shadow-2xl ring-1 ring-slate-200">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-base font-semibold text-slate-900">Edit subscriber</div>
                 <div className="mt-1 text-sm text-slate-600">
-                  {activeRow.postcode} • {activeRow.address}
+                  {form.postcode} • {form.address}
                 </div>
               </div>
               <button
@@ -294,8 +301,8 @@ export default function OpsSubscribersPage() {
               <div>
                 <label className="text-xs font-semibold text-slate-600">Status</label>
                 <select
-                  value={activeRow.status || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, status: e.target.value })}
+                  value={form.status || ""}
+                  onChange={(e) => setForm({ ...form, status: e.target.value })}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                 >
                   <option value="">(blank)</option>
@@ -308,7 +315,7 @@ export default function OpsSubscribersPage() {
                   <option value="canceled">canceled</option>
                 </select>
                 <p className="mt-1 text-xs text-slate-500">
-                  Driver views only include <span className="font-semibold">active</span> /
+                  Driver lists only include <span className="font-semibold">active</span> /{" "}
                   <span className="font-semibold">trialing</span>.
                 </p>
               </div>
@@ -316,10 +323,8 @@ export default function OpsSubscribersPage() {
               <div>
                 <label className="text-xs font-semibold text-slate-600">Next collection date</label>
                 <input
-                  value={activeRow.next_collection_date || ""}
-                  onChange={(e) =>
-                    setActiveRow({ ...activeRow, next_collection_date: e.target.value })
-                  }
+                  value={form.next_collection_date || ""}
+                  onChange={(e) => setForm({ ...form, next_collection_date: e.target.value })}
                   placeholder="YYYY-MM-DD"
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                 />
@@ -328,8 +333,8 @@ export default function OpsSubscribersPage() {
               <div>
                 <label className="text-xs font-semibold text-slate-600">Route area</label>
                 <input
-                  value={activeRow.route_area || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, route_area: e.target.value })}
+                  value={form.route_area || ""}
+                  onChange={(e) => setForm({ ...form, route_area: e.target.value })}
                   placeholder="e.g. Porthcawl"
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                 />
@@ -338,8 +343,8 @@ export default function OpsSubscribersPage() {
               <div>
                 <label className="text-xs font-semibold text-slate-600">Route day</label>
                 <select
-                  value={activeRow.route_day || ""}
-                  onChange={(e) => setActiveRow({ ...activeRow, route_day: e.target.value })}
+                  value={form.route_day || ""}
+                  onChange={(e) => setForm({ ...form, route_day: e.target.value })}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                 >
                   <option value="">(not set)</option>
@@ -349,3 +354,67 @@ export default function OpsSubscribersPage() {
                   <option value="Thursday">Thursday</option>
                   <option value="Friday">Friday</option>
                   <option value="Saturday">Saturday</option>
+                  <option value="Sunday">Sunday</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-600">Pause from</label>
+                <input
+                  value={form.pause_from || ""}
+                  onChange={(e) => setForm({ ...form, pause_from: e.target.value })}
+                  placeholder="YYYY-MM-DD"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-600">Pause to</label>
+                <input
+                  value={form.pause_to || ""}
+                  onChange={(e) => setForm({ ...form, pause_to: e.target.value })}
+                  placeholder="YYYY-MM-DD"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="text-xs font-semibold text-slate-600">Ops notes</label>
+                <textarea
+                  value={form.ops_notes || ""}
+                  onChange={(e) => setForm({ ...form, ops_notes: e.target.value })}
+                  placeholder="Gate code, side access, bin location, dog, etc."
+                  rows={4}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={save}
+                disabled={saving}
+                className={cx(
+                  "rounded-xl px-4 py-3 text-sm font-semibold shadow-sm ring-1 active:scale-[0.99]",
+                  saving
+                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                )}
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={closeEditor}
+                className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-slate-300 hover:bg-slate-50 active:scale-[0.99]"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
