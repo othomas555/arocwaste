@@ -4,7 +4,6 @@ import Link from "next/link";
 import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 function isoDate(d) {
-  // d is Date
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
@@ -27,10 +26,8 @@ function startOfWeekMonday(date) {
 }
 
 function isPausedOn(sub, yyyyMmDd) {
-  // pause_from / pause_to are expected as YYYY-MM-DD or null
-  if (!sub) return false;
-  const from = sub.pause_from;
-  const to = sub.pause_to;
+  const from = sub?.pause_from;
+  const to = sub?.pause_to;
 
   if (!from && !to) return false;
   if (from && !to) return yyyyMmDd >= from;
@@ -46,17 +43,17 @@ export default function OpsDashboard(props) {
   const {
     today,
     todayName,
-    thisWeekDays, // [{date,label,dayName}]
-    overviewByArea, // [{route_area, route_day, due_count, paused_count}]
-    weekPlanner, // { [date]: { [area]: count } }
-    areas, // [{route_area, route_day}]
+    thisWeekDays,
+    overviewByArea,
+    weekPlanner,
+    areas,
     alerts,
     vehicles,
     staff,
   } = props;
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [createArea, setCreateArea] = useState(null); // {route_area, route_day}
+  const [createArea, setCreateArea] = useState(null);
   const [vehicleId, setVehicleId] = useState("");
   const [staffIds, setStaffIds] = useState([]);
   const [creating, setCreating] = useState(false);
@@ -66,7 +63,6 @@ export default function OpsDashboard(props) {
     const drivers = [];
     const others = [];
     for (const s of staff || []) {
-      // role is optional; fall back to "driver" assumption if name contains driver? (no)
       if ((s.role || "").toLowerCase().includes("driver")) drivers.push(s);
       else others.push(s);
     }
@@ -88,11 +84,10 @@ export default function OpsDashboard(props) {
   }
 
   async function tryCreateDailyRun(payload) {
-    // Robust: try common endpoints in order (whichever you already have).
     const candidates = [
-      "/api/ops/daily-runs", // POST (common REST style)
-      "/api/ops/daily-runs/create", // POST
-      "/api/ops/create-daily-run", // POST
+      "/api/ops/daily-runs",
+      "/api/ops/daily-runs/create",
+      "/api/ops/create-daily-run",
     ];
 
     let lastErr = null;
@@ -105,7 +100,7 @@ export default function OpsDashboard(props) {
           body: JSON.stringify(payload),
         });
 
-        if (res.status === 404) continue; // try next candidate
+        if (res.status === 404) continue;
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -113,7 +108,6 @@ export default function OpsDashboard(props) {
           continue;
         }
 
-        // Expected: { id } or { run: { id } }
         const id = data?.id || data?.run?.id;
         if (!id) {
           lastErr = new Error("Create run succeeded but no run id returned.");
@@ -132,22 +126,10 @@ export default function OpsDashboard(props) {
   async function onCreateRun() {
     setCreateError("");
 
-    if (!createArea?.route_area) {
-      setCreateError("Missing route area.");
-      return;
-    }
-    if (!createArea?.route_day) {
-      setCreateError("Missing route day for this area.");
-      return;
-    }
-    if (!vehicleId) {
-      setCreateError("Select a vehicle.");
-      return;
-    }
-    if (!staffIds.length) {
-      setCreateError("Select at least one staff member.");
-      return;
-    }
+    if (!createArea?.route_area) return setCreateError("Missing route area.");
+    if (!createArea?.route_day) return setCreateError("Missing route day for this area.");
+    if (!vehicleId) return setCreateError("Select a vehicle.");
+    if (!staffIds.length) return setCreateError("Select at least one staff member.");
 
     setCreating(true);
     try {
@@ -160,8 +142,6 @@ export default function OpsDashboard(props) {
       };
 
       const { id } = await tryCreateDailyRun(payload);
-
-      // Go straight to run view
       window.location.href = `/ops/run/${id}`;
     } catch (e) {
       setCreateError(e?.message || "Failed to create run.");
@@ -169,10 +149,12 @@ export default function OpsDashboard(props) {
     }
   }
 
+  // ✅ Added: Route Areas link (and moved nav into a clear “Ops setup” section)
   const navLinks = [
     { href: "/ops/subscribers", title: "Subscribers", desc: "Status, routes, next dates" },
     { href: "/ops/today", title: "Today List", desc: "Due today + mark collected" },
     { href: "/ops/daily-runs", title: "Daily Runs", desc: "Plan runs + assign staff/vehicle" },
+    { href: "/ops/routes", title: "Route areas", desc: "Days + AM/PM + postcode coverage" },
     { href: "/ops/staff", title: "Staff", desc: "Drivers & crew" },
     { href: "/ops/vehicles", title: "Vehicles", desc: "Vans, capacity, notes" },
   ];
@@ -180,7 +162,6 @@ export default function OpsDashboard(props) {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        {/* Header */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">Ops Dashboard</h1>
@@ -205,8 +186,7 @@ export default function OpsDashboard(props) {
           </div>
         </div>
 
-        {/* Quick nav */}
-        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
           {navLinks.map((x) => (
             <Link
               key={x.href}
@@ -219,7 +199,6 @@ export default function OpsDashboard(props) {
           ))}
         </div>
 
-        {/* Today overview + Alerts */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="lg:col-span-2 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
@@ -263,9 +242,7 @@ export default function OpsDashboard(props) {
                         <td className="px-3 py-2 text-right">
                           <div className="flex items-center justify-end gap-2">
                             <Link
-                              href={`/ops/today?area=${encodeURIComponent(
-                                row.route_area || ""
-                              )}`}
+                              href={`/ops/today?area=${encodeURIComponent(row.route_area || "")}`}
                               className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
                             >
                               Open
@@ -309,8 +286,14 @@ export default function OpsDashboard(props) {
             </div>
 
             <div className="mt-3 text-xs text-gray-500">
-              Tip: “Create run” is only enabled when there are stops due today for that route
-              area.
+              If you haven’t configured route areas yet, go to{" "}
+              <Link
+                href="/ops/routes"
+                className="font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+              >
+                /ops/routes
+              </Link>
+              .
             </div>
           </div>
 
@@ -319,33 +302,15 @@ export default function OpsDashboard(props) {
             <p className="text-xs text-gray-600">Quick sanity checks</p>
 
             <div className="mt-3 space-y-2">
-              <AlertRow
-                label="Overdue collections"
-                value={alerts.overdue_active}
-                href="/ops/subscribers?filter=overdue"
-              />
-              <AlertRow
-                label="Pending (not active)"
-                value={alerts.pending}
-                href="/ops/subscribers?filter=pending"
-              />
-              <AlertRow
-                label="Missing route_day / route_area"
-                value={alerts.missing_route}
-                href="/ops/subscribers?filter=missing_route"
-              />
-              <AlertRow
-                label="Paused right now"
-                value={alerts.paused_now}
-                href="/ops/subscribers?filter=paused"
-              />
+              <AlertRow label="Overdue collections" value={alerts.overdue_active} href="/ops/subscribers?filter=overdue" />
+              <AlertRow label="Pending (not active)" value={alerts.pending} href="/ops/subscribers?filter=pending" />
+              <AlertRow label="Missing route_day / route_area" value={alerts.missing_route} href="/ops/subscribers?filter=missing_route" />
+              <AlertRow label="Paused right now" value={alerts.paused_now} href="/ops/subscribers?filter=paused" />
             </div>
 
             <div className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
               <div className="font-semibold text-gray-900">Driver portal</div>
-              <div className="mt-1">
-                Drivers sign in here to view assigned runs and mark collections.
-              </div>
+              <div className="mt-1">Drivers sign in here to view assigned runs and mark collections.</div>
               <Link
                 href="/driver/login"
                 className="mt-2 inline-block font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
@@ -353,15 +318,27 @@ export default function OpsDashboard(props) {
                 /driver/login
               </Link>
             </div>
+
+            <div className="mt-3 rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
+              <div className="font-semibold text-gray-900">Route setup</div>
+              <div className="mt-1">Manage areas, days, AM/PM and postcode coverage.</div>
+              <Link
+                href="/ops/routes"
+                className="mt-2 inline-block font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-300"
+              >
+                /ops/routes
+              </Link>
+            </div>
           </div>
         </div>
 
-        {/* Week planner */}
         <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-gray-900">This week planner (Mon–Fri)</h2>
-              <p className="text-xs text-gray-600">Counts by route area based on next_collection_date</p>
+              <p className="text-xs text-gray-600">
+                Counts by route area based on next_collection_date
+              </p>
             </div>
             <Link
               href="/ops/daily-runs"
@@ -440,7 +417,6 @@ export default function OpsDashboard(props) {
         </div>
       </div>
 
-      {/* Create run modal */}
       {createOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-xl rounded-2xl bg-white shadow-xl">
@@ -483,9 +459,6 @@ export default function OpsDashboard(props) {
                       </option>
                     ))}
                   </select>
-                  <div className="mt-1 text-xs text-gray-500">
-                    Uses your existing vehicles table.
-                  </div>
                 </div>
 
                 <div>
@@ -515,9 +488,6 @@ export default function OpsDashboard(props) {
                     ) : (
                       <div className="text-sm text-gray-600">No staff found.</div>
                     )}
-                  </div>
-                  <div className="mt-1 text-xs text-gray-500">
-                    Picks from staff table. (If roles exist, drivers show first.)
                   </div>
                 </div>
               </div>
@@ -602,21 +572,15 @@ export async function getServerSideProps() {
   const mondayIso = isoDate(monday);
   const fridayIso = isoDate(friday);
 
-  // Pull minimal fields needed to compute today overview + alerts + planner.
   const { data: subs, error: subsErr } = await supabase
     .from("subscriptions")
-    .select(
-      "id,status,route_day,route_area,next_collection_date,pause_from,pause_to"
-    )
+    .select("id,status,route_day,route_area,next_collection_date,pause_from,pause_to")
     .gte("next_collection_date", mondayIso)
     .lte("next_collection_date", fridayIso);
 
-  // Also fetch "today slice" for accurate paused/due counts & overdue/pending/missing_route checks.
   const { data: subsAllForAlerts, error: subsAllErr } = await supabase
     .from("subscriptions")
-    .select(
-      "id,status,route_day,route_area,next_collection_date,pause_from,pause_to"
-    );
+    .select("id,status,route_day,route_area,next_collection_date,pause_from,pause_to");
 
   const { data: vehicles } = await supabase
     .from("vehicles")
@@ -629,8 +593,6 @@ export async function getServerSideProps() {
     .order("name", { ascending: true });
 
   if (subsErr || subsAllErr) {
-    // Keep it production-safe: show dashboard with empty data rather than throwing
-    // (so Basic Auth isn't masking a 500 during ops).
     return {
       props: {
         today,
@@ -650,7 +612,6 @@ export async function getServerSideProps() {
   const weekSubs = subs || [];
   const allSubs = subsAllForAlerts || [];
 
-  // Compute alerts
   let overdue_active = 0;
   let pending = 0;
   let missing_route = 0;
@@ -660,10 +621,11 @@ export async function getServerSideProps() {
     const paused = isPausedOn(s, today);
     if (paused) paused_now += 1;
 
-    const isActive = String(s.status || "").toLowerCase() === "active";
-    const isPending = String(s.status || "").toLowerCase() === "pending";
-    if (isPending) pending += 1;
+    const status = String(s.status || "").toLowerCase();
+    const isActive = status === "active";
+    const isPending = status === "pending";
 
+    if (isPending) pending += 1;
     if (!s.route_day || !s.route_area) missing_route += 1;
 
     if (isActive && !paused && s.next_collection_date && s.next_collection_date < today) {
@@ -671,8 +633,7 @@ export async function getServerSideProps() {
     }
   }
 
-  // Today overview grouped by route_area (only those due today)
-  const todayMap = new Map(); // key = route_area||"" + "|" + route_day||""
+  const todayMap = new Map();
   for (const s of allSubs) {
     if (!s.next_collection_date || s.next_collection_date !== today) continue;
 
@@ -694,7 +655,6 @@ export async function getServerSideProps() {
   }
 
   const overviewByArea = Array.from(todayMap.values()).sort((a, b) => {
-    // Put named areas first, alphabetical
     const aa = a.route_area || "";
     const bb = b.route_area || "";
     if (!aa && bb) return 1;
@@ -702,9 +662,9 @@ export async function getServerSideProps() {
     return aa.localeCompare(bb);
   });
 
-  // Week planner: counts by date+area for ACTIVE and not paused on that day
-  const weekPlanner = {}; // date -> area -> count
-  const areaKeySet = new Set(); // build list of areas
+  const weekPlanner = {};
+  const areaKeySet = new Set();
+
   for (const s of weekSubs) {
     const date = s.next_collection_date;
     if (!date) continue;
@@ -722,7 +682,6 @@ export async function getServerSideProps() {
     weekPlanner[date][area] = (weekPlanner[date][area] || 0) + 1;
   }
 
-  // Areas list: include areas seen in week data + today overview (so the table stays useful)
   for (const row of overviewByArea) {
     areaKeySet.add(`${row.route_area || ""}|${row.route_day || ""}`);
   }
