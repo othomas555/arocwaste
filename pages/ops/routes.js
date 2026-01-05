@@ -45,7 +45,7 @@ export default function OpsRoutes({ initial }) {
       byDay[d].push(r);
     }
     // sort entries in each cell by slot order
-    for (const [n, byDay] of map.entries()) {
+    for (const [, byDay] of map.entries()) {
       for (const d of Object.keys(byDay)) {
         byDay[d].sort((a, b) => {
           const ai = SLOTS.indexOf(a.slot || "ANY");
@@ -188,8 +188,8 @@ export default function OpsRoutes({ initial }) {
   const allEntriesSorted = useMemo(() => {
     const copy = [...(rows || [])];
     copy.sort((a, b) => {
-      const aa = (a.active !== false) ? 0 : 1;
-      const bb = (b.active !== false) ? 0 : 1;
+      const aa = a.active !== false ? 0 : 1;
+      const bb = b.active !== false ? 0 : 1;
       if (aa !== bb) return aa - bb;
       const n = String(a.name || "").localeCompare(String(b.name || ""));
       if (n !== 0) return n;
@@ -218,6 +218,14 @@ export default function OpsRoutes({ initial }) {
             >
               Back to dashboard
             </Link>
+
+            <Link
+              href="/ops/route-assign"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+            >
+              Bulk assign routes
+            </Link>
+
             <button
               type="button"
               onClick={() => openCreate()}
@@ -337,17 +345,17 @@ export default function OpsRoutes({ initial }) {
           </div>
 
           <div className="mt-3 text-xs text-gray-500">
-            Behind the scenes, each “slot” is a row in <span className="font-mono">route_areas</span>.
-            Unique is enforced on <span className="font-mono">(name, route_day, slot)</span>.
+            Each “slot” is a row in <span className="font-mono">route_areas</span>. Duplicate
+            protection is on <span className="font-mono">(name, route_day, slot)</span>.
           </div>
         </div>
 
-        {/* All entries (detail list) */}
+        {/* All entries */}
         <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div className="mb-3">
             <h2 className="text-sm font-semibold text-gray-900">All entries</h2>
             <p className="text-xs text-gray-600">
-              Use this when you want to edit postcodes/notes or disable something.
+              Use this to edit postcodes/notes or disable an entry.
             </p>
           </div>
 
@@ -504,9 +512,7 @@ export default function OpsRoutes({ initial }) {
                       </option>
                     ))}
                   </select>
-                  <div className="mt-1 text-xs text-gray-500">
-                    Use AM/PM if you want to split the day.
-                  </div>
+                  <div className="mt-1 text-xs text-gray-500">Use AM/PM if splitting the day.</div>
                 </div>
 
                 <div className="sm:col-span-2">
@@ -519,9 +525,6 @@ export default function OpsRoutes({ initial }) {
                     className="mt-1 h-32 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
                     placeholder={`Examples:\nCF36\nCF33 4\nCF33 6`}
                   />
-                  <div className="mt-1 text-xs text-gray-500">
-                    Match is prefix-based (CF36 covers CF36 5AA etc).
-                  </div>
                 </div>
 
                 <div className="sm:col-span-2">
@@ -576,7 +579,7 @@ export default function OpsRoutes({ initial }) {
               </div>
 
               <div className="mt-3 text-xs text-gray-500">
-                If you try to create the exact same (Area + Day + Slot) twice, you’ll get a duplicate error — that’s intentional.
+                Duplicate protection: you can’t create the exact same (Area + Day + Slot) twice.
               </div>
             </div>
           </div>
