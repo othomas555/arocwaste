@@ -1,338 +1,439 @@
+// pages/bins-bags.js
 import { useMemo, useState } from "react";
-import Layout from "../components/layout";
-import { findRouteForPostcode } from "../utils/postcode";
+import Link from "next/link";
 
-function PricePill({ children }) {
-  return (
-    <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-      {children}
-    </span>
-  );
+function classNames(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
-export default function BinsBagsPage() {
+function fmtGBP(n) {
+  const x = Number(n || 0);
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(x);
+}
+
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(x)));
+}
+
+function normalizePostcode(pc) {
+  return String(pc || "").trim().toUpperCase().replace(/\s+/g, " ").trim();
+}
+
+async function lookupRoute(postcode) {
+  const pc = normalizePostcode(postcode);
+  if (!pc) return null;
+
+  const res = await fetch(`/api/route-lookup?postcode=${encodeURIComponent(pc)}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) return null;
+  return json;
+}
+
+function sortMatches(matches) {
+  const dayIndex = {
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+    Friday: 5,
+    Saturday: 6,
+    Sunday: 7,
+  };
+  const slotIndex = { AM: 1, PM: 2, ANY: 3 };
+
+  const arr = Array.isArray(matches) ? [...matches] : [];
+  arr.sort((a, b) => {
+    const da = dayIndex[a.route_day] || 99;
+    const db = dayIndex[b.route_day] || 99;
+    if (da !== db) return da - db;
+
+    const sa = slotIndex[a.slot] || 99;
+    const sb = slotIndex[b.slot] || 99;
+    if (sa !== sb) return sa - sb;
+
+    return String(a.route_area || "").localeCompare(String(b.route_area || ""));
+  });
+  return arr;
+}
+
+export default function BinsBags() {
+  // --- Postcode / coverage ---
   const [postcode, setPostcode] = useState("");
   const [checked, setChecked] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [routeResult, setRouteResult] = useState(null);
+  const [checkError, setCheckError] = useState("");
 
-  const [frequency, setFrequency] = useState("weekly"); // weekly|fortnightly|threeweekly
-  const [extraBags, setExtraBags] = useState(0);
-  const [useOwnBin, setUseOwnBin] = useState(false);
-
-  const [name, setName] = useState("");
+  // --- Subscription form fields ---
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
 
+  const [frequency, setFrequency] = useState("weekly"); // weekly | fortnightly | threeweekly
+  const [extraBags, setExtraBags] = useState(0);
+  const [useOwnBin, setUseOwnBin] = useState(false);
+
+  // --- UI state ---
   const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState("");
+  const [submitError, setSubmitError] = useState("");
 
-  const route = useMemo(() => {
-    if (!checked) return null;
-    return findRouteForPostcode(postcode);
-  }, [checked, postcode]);
+  // Prices are displayed as guidance only — Stripe is the source of truth at checkout.
+  // Keep these aligned with your Stripe prices if you want the UI to match exactly.
+  const priceGuide = useMemo(() => {
+    // You can tweak these numbers if you want — they are only for display.
+    // If you want exact pricing displayed, we can add a lightweight pricing API later.
+    const base = {
+      weekly: 8.0,
+      fortnightly: 9.0,
+      threeweekly: 10.0,
+    };
+    const bag = {
+      weekly: 2.0,
+      fortnightly: 2.0,
+      threeweekly: 2.0,
+    };
+    const deposit = 25.0; // just a guide
+    return { base, bag, deposit };
+  }, []);
 
-  const covered = checked && !!route;
+  const covered = checked && routeResult?.in_area && routeResult?.default;
+  const matchesSorted = useMemo(
+    () => sortMatches(routeResult?.matches),
+    [routeResult?.matches]
+  );
 
-  const freqLabel =
-    frequency === "weekly"
-      ? "Weekly"
-      : frequency === "fortnightly"
-      ? "Fortnightly"
-      : "Three-weekly";
+  const totalGuide = useMemo(() => {
+    const base = priceGuide.base[frequency] || 0;
+    const bag = (priceGuide.bag[frequency] || 0) * clampInt(extraBags, 0, 10);
+    const deposit = useOwnBin ? 0 : priceGuide.deposit;
+    return base + bag + deposit;
+  }, [priceGuide, frequency, extraBags, useOwnBin]);
+
+  async function onCheckPostcode() {
+    setCheckError("");
+    setSubmitError("");
+    setChecked(false);
+    setRouteResult(null);
+
+    const pc = normalizePostcode(postcode);
+    if (!pc) {
+      setCheckError("Enter a postcode first.");
+      return;
+    }
+
+    setChecking(true);
+    try {
+      const result = await lookupRoute(pc);
+      setRouteResult(result);
+      setChecked(true);
+
+      if (!result || !result.in_area) {
+        setCheckError("Sorry — we don’t currently cover that postcode.");
+      }
+    } catch (e) {
+      setChecked(true);
+      setRouteResult(null);
+      setCheckError("Postcode lookup failed. Please try again.");
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function subscribe() {
-    try {
-      setErr("");
-      setSubmitting(true);
+    setSubmitError("");
 
+    // Require postcode coverage check
+    if (!covered) {
+      setSubmitError("Please check your postcode first.");
+      return;
+    }
+
+    const pc = routeResult?.postcode || normalizePostcode(postcode);
+
+    if (!email.trim() || !pc || !address.trim()) {
+      setSubmitError("Please fill in email, postcode, and address.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
       const res = await fetch("/api/create-subscription-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          postcode,
-          routeDay: route?.day || "",
-          routeArea: route?.area || "",
+          email: email.trim(),
+          name: name.trim(),
+          phone: phone.trim(),
+          postcode: pc,
+          address: address.trim(),
           frequency,
-          extraBags,
-          useOwnBin,
-          name,
-          email,
-          phone,
-          address,
+          extraBags: clampInt(extraBags, 0, 10),
+          useOwnBin: !!useOwnBin,
+
+          // IMPORTANT:
+          // Do NOT send routeDay/routeArea anymore.
+          // Backend assigns route from /api/route-lookup and writes route_day/route_area/route_slot + next_collection_date.
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || "Could not start subscription checkout");
-      if (!json?.url) throw new Error("Stripe did not return a checkout URL.");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSubmitError(data?.error || `Subscribe failed (${res.status})`);
+        setSubmitting(false);
+        return;
+      }
 
-      window.location.href = json.url;
+      if (data?.url) {
+        window.location.href = data.url;
+        return;
+      }
+
+      setSubmitError("Subscribe failed: no checkout URL returned.");
+      setSubmitting(false);
     } catch (e) {
-      setErr(e?.message || "Subscription failed");
+      setSubmitError(e?.message || "Subscribe failed.");
       setSubmitting(false);
     }
   }
 
-  const canSubscribe =
-    covered &&
-    name.trim() &&
-    email.trim() &&
-    phone.trim() &&
-    address.trim();
-
   return (
-    <Layout
-      title="Bins & Bags Subscription | AROC Waste"
-      description="Subscribe to regular wheelie bin collection. Choose weekly, fortnightly or three-weekly. Extra bags available."
-    >
-      <div className="bg-[#f7f9ff]">
-        <div className="mx-auto max-w-6xl px-4 py-12">
-          <div className="mb-8">
-            <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900">
-              Bins & bags subscription
-            </h1>
-            <p className="mt-2 text-slate-600 max-w-2xl">
-              Regular 240L wheelie bin emptying billed per service interval — choose weekly,
-              fortnightly or three-weekly. Add extra bags if needed.
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-3xl px-4 py-8">
+        <div className="mb-6 flex items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-semibold text-gray-900">Bins & Bags</h1>
+            <p className="mt-1 text-sm text-gray-600">
+              Domestic bin collections — ops-first, simple, reliable.
             </p>
+          </div>
+          <Link
+            href="/my-bins"
+            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+          >
+            Customer portal
+          </Link>
+        </div>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              <PricePill>£16.80 per empty</PricePill>
-              <PricePill>Extra bag £3.20</PricePill>
-              <PricePill>£50 bin deposit (or use your own)</PricePill>
+        {/* Postcode check */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900">1) Check your postcode</h2>
+          <p className="mt-1 text-xs text-gray-600">
+            We’ll confirm your collection area and days before you subscribe.
+          </p>
+
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              value={postcode}
+              onChange={(e) => setPostcode(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+              placeholder="e.g. CF36 5AA"
+            />
+            <button
+              type="button"
+              onClick={onCheckPostcode}
+              disabled={checking}
+              className={classNames(
+                "rounded-lg px-4 py-2 text-sm font-semibold",
+                checking ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
+              )}
+            >
+              {checking ? "Checking…" : "Check"}
+            </button>
+          </div>
+
+          {checkError ? (
+            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              {checkError}
+            </div>
+          ) : null}
+
+          {covered ? (
+            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+              <div className="font-semibold">✅ We cover {routeResult.postcode}.</div>
+
+              <div className="mt-2">
+                <div className="text-sm">
+                  <span className="font-semibold">Area:</span>{" "}
+                  {routeResult.default.route_area}
+                </div>
+
+                <div className="mt-2 text-sm">
+                  <div className="font-semibold">Collections:</div>
+                  <ul className="mt-1 list-disc pl-5">
+                    {matchesSorted.map((m, i) => (
+                      <li key={`${m.route_area_id || i}-${m.route_day}-${m.slot}-${i}`}>
+                        {m.route_day}
+                        {m.slot && m.slot !== "ANY" ? ` ${m.slot}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {routeResult.default?.next_date ? (
+                  <div className="mt-2 text-xs text-emerald-800">
+                    Next collection date (default):{" "}
+                    <span className="font-semibold">{routeResult.default.next_date}</span>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mt-3 text-xs text-gray-500">
+            If you’re out of area, you can still contact us — we may expand coverage.
+          </div>
+        </div>
+
+        {/* Subscription form */}
+        <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900">2) Choose your plan</h2>
+          <p className="mt-1 text-xs text-gray-600">
+            Card payments only. You can manage, pause, or cancel in the customer portal.
+          </p>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold text-gray-700">Frequency</label>
+              <select
+                value={frequency}
+                onChange={(e) => setFrequency(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+              >
+                <option value="weekly">Weekly</option>
+                <option value="fortnightly">Fortnightly</option>
+                <option value="threeweekly">3-weekly</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={extraBags}
+                onChange={(e) => setExtraBags(clampInt(e.target.value, 0, 10))}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+              />
+              <div className="mt-1 text-xs text-gray-500">0–10</div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="flex items-center gap-2 text-sm text-gray-900">
+                <input
+                  type="checkbox"
+                  checked={useOwnBin}
+                  onChange={(e) => setUseOwnBin(e.target.checked)}
+                />
+                I’ll use my own bin (no deposit)
+              </label>
             </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-3">
-            {/* Left: steps */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Postcode check */}
-              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">1) Check your postcode</h2>
-                <p className="mt-1 text-sm text-slate-600">
-                  We’ll confirm your collection day based on your area.
-                </p>
-
-                <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <div className="flex-1">
-                    <label className="text-sm font-medium text-slate-700">Postcode</label>
-                    <input
-                      value={postcode}
-                      onChange={(e) => {
-                        setPostcode(e.target.value);
-                        setChecked(false);
-                      }}
-                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 uppercase outline-none focus:border-indigo-400"
-                      placeholder="e.g. CF33 4XX"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setChecked(true)}
-                    className="rounded-2xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white hover:opacity-90"
-                  >
-                    Check area
-                  </button>
-                </div>
-
-                {checked && covered && (
-                  <div className="mt-4 rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-800">
-                    ✅ We cover your postcode. Your usual collection day is{" "}
-                    <span className="font-semibold">{route.day}</span>
-                    {route.area ? ` (${route.area})` : ""}.
-                  </div>
-                )}
-
-                {checked && !covered && (
-                  <div className="mt-4 rounded-2xl bg-rose-50 p-4 text-sm text-rose-800">
-                    Sorry — we don’t cover that postcode yet.
-                  </div>
-                )}
-              </div>
-
-              {/* Plan */}
-              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">2) Choose your frequency</h2>
-                <p className="mt-1 text-sm text-slate-600">
-                  Billing matches the schedule: weekly bills every week, fortnightly every 2 weeks, etc.
-                </p>
-
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  <PlanCard
-                    active={frequency === "weekly"}
-                    title="Weekly"
-                    subtitle="Billed every 1 week"
-                    onClick={() => setFrequency("weekly")}
-                  />
-                  <PlanCard
-                    active={frequency === "fortnightly"}
-                    title="Fortnightly"
-                    subtitle="Billed every 2 weeks"
-                    onClick={() => setFrequency("fortnightly")}
-                  />
-                  <PlanCard
-                    active={frequency === "threeweekly"}
-                    title="Three-weekly"
-                    subtitle="Billed every 3 weeks"
-                    onClick={() => setFrequency("threeweekly")}
-                  />
-                </div>
-
-                <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="text-sm font-semibold text-slate-900">Extra bags per collection</div>
-                    <div className="mt-2 flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setExtraBags((n) => Math.max(0, n - 1))}
-                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                      >
-                        −
-                      </button>
-                      <div className="min-w-[44px] text-center text-sm font-semibold text-slate-900">
-                        {extraBags}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setExtraBags((n) => Math.min(10, n + 1))}
-                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                      >
-                        +
-                      </button>
-                      <div className="text-sm text-slate-600">£3.20 each ({freqLabel})</div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="text-sm font-semibold text-slate-900">Bin deposit</div>
-                    <div className="mt-2 text-sm text-slate-600">
-                      £50 deposit if you need our bin, or use your own 240L wheelie bin.
-                    </div>
-
-                    <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
-                      <input
-                        type="checkbox"
-                        checked={useOwnBin}
-                        onChange={(e) => setUseOwnBin(e.target.checked)}
-                      />
-                      I will use my own bin (no deposit)
-                    </label>
-                  </div>
-                </div>
-              </div>
-
-              {/* Details */}
-              <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">3) Your details</h2>
-
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <Field label="Full name" value={name} onChange={setName} />
-                  <Field label="Email" value={email} onChange={setEmail} type="email" />
-                  <Field label="Phone" value={phone} onChange={setPhone} />
-                  <Field label="Address" value={address} onChange={setAddress} wide />
-                </div>
-
-                {err && (
-                  <div className="mt-4 rounded-2xl bg-rose-50 p-4 text-sm text-rose-700">
-                    {err}
-                  </div>
-                )}
-              </div>
+          <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-900">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold">Estimated total today</div>
+              <div className="text-lg font-semibold">{fmtGBP(totalGuide)}</div>
             </div>
-
-            {/* Right summary */}
-            <div className="space-y-6">
-              <div className="sticky top-6 rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900">Summary</h2>
-
-                <div className="mt-4 space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Service</span>
-                    <span className="font-semibold">240L bin emptying</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Frequency</span>
-                    <span className="font-semibold">{freqLabel}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Price</span>
-                    <span className="font-semibold">£16.80 / service</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Extra bags</span>
-                    <span className="font-semibold">{extraBags}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Bin deposit</span>
-                    <span className="font-semibold">{useOwnBin ? "£0.00" : "£50.00"}</span>
-                  </div>
-
-                  {covered ? (
-                    <div className="mt-3 rounded-2xl bg-emerald-50 p-3 text-emerald-800">
-                      Collection day: <span className="font-semibold">{route.day}</span>
-                      {route.area ? ` (${route.area})` : ""}
-                    </div>
-                  ) : (
-                    <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-slate-600">
-                      Enter postcode to confirm coverage.
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={subscribe}
-                  disabled={!canSubscribe || submitting}
-                  className={[
-                    "mt-6 w-full rounded-2xl px-6 py-3 text-sm font-semibold text-white",
-                    !canSubscribe || submitting
-                      ? "bg-slate-300 cursor-not-allowed"
-                      : "bg-indigo-600 hover:opacity-90",
-                  ].join(" ")}
-                >
-                  {submitting ? "Redirecting to Stripe..." : "Subscribe"}
-                </button>
-
-                <p className="mt-3 text-xs text-slate-500">
-                  You’ll be able to manage your subscription (card, cancel, etc.) via Stripe’s customer portal.
-                </p>
-              </div>
+            <div className="mt-1 text-xs text-gray-600">
+              This is a guide only — Stripe checkout is the source of truth.
             </div>
           </div>
         </div>
+
+        {/* Customer details */}
+        <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900">3) Your details</h2>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-semibold text-gray-700">Address</label>
+              <input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="House number + street + town"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-gray-700">Email</label>
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="you@example.com"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-gray-700">Name (optional)</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="Owain"
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-semibold text-gray-700">Phone (optional)</label>
+              <input
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="07..."
+              />
+            </div>
+          </div>
+
+          {submitError ? (
+            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              {submitError}
+            </div>
+          ) : null}
+
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-xs text-gray-500">
+              By subscribing, you agree to recurring charges until cancelled.
+            </div>
+
+            <button
+              type="button"
+              onClick={subscribe}
+              disabled={submitting || !covered}
+              className={classNames(
+                "rounded-lg px-5 py-2 text-sm font-semibold",
+                submitting || !covered
+                  ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+                  : "bg-gray-900 text-white hover:bg-black"
+              )}
+              title={!covered ? "Check your postcode first" : "Continue to payment"}
+            >
+              {submitting ? "Redirecting…" : "Continue to payment"}
+            </button>
+          </div>
+
+          {!covered ? (
+            <div className="mt-2 text-xs text-gray-500">
+              You must check your postcode and be in-area before subscribing.
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-6 text-center text-xs text-gray-500">
+          Ops? Go to{" "}
+          <Link
+            href="/ops/dashboard"
+            className="font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
+          >
+            /ops/dashboard
+          </Link>
+        </div>
       </div>
-    </Layout>
-  );
-}
-
-function PlanCard({ active, title, subtitle, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "rounded-2xl border p-4 text-left shadow-sm transition",
-        active
-          ? "border-indigo-300 bg-indigo-50"
-          : "border-slate-200 bg-white hover:bg-slate-50",
-      ].join(" ")}
-    >
-      <div className="text-sm font-semibold text-slate-900">{title}</div>
-      <div className="mt-1 text-xs text-slate-600">{subtitle}</div>
-    </button>
-  );
-}
-
-function Field({ label, value, onChange, type = "text", wide = false }) {
-  return (
-    <div className={wide ? "sm:col-span-2" : ""}>
-      <label className="text-sm font-medium text-slate-700">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-indigo-400"
-      />
     </div>
   );
 }
