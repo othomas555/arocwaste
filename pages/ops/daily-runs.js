@@ -1,7 +1,9 @@
+// pages/ops/daily-runs.js
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const SLOTS = ["ANY", "AM", "PM"];
 
 function cx(...classes) {
   return classes.filter(Boolean).join(" ");
@@ -35,6 +37,7 @@ export default function OpsDailyRunsPage() {
     run_date: londonTodayYMD(),
     route_day: "Monday",
     route_area: "",
+    route_slot: "ANY",
     vehicle_id: "",
     notes: "",
     staff_ids: [],
@@ -46,6 +49,7 @@ export default function OpsDailyRunsPage() {
     run_date: "",
     route_day: "",
     route_area: "",
+    route_slot: "ANY",
     vehicle_id: "",
     notes: "",
     staff_ids: [],
@@ -83,6 +87,7 @@ export default function OpsDailyRunsPage() {
 
   useEffect(() => {
     loadAll(date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
 
   const activeStaff = useMemo(() => staff.filter((s) => s.active), [staff]);
@@ -92,12 +97,20 @@ export default function OpsDailyRunsPage() {
     setSaving(true);
     setError("");
     try {
+      const route_area = (createForm.route_area || "").toString().trim();
+      const route_slot = (createForm.route_slot || "ANY").toString().toUpperCase();
+      const route_day = (createForm.route_day || "").toString();
+
       const payload = {
-        ...createForm,
         run_date: date,
-        route_area: (createForm.route_area || "").toString().trim(),
+        route_day,
+        route_area,
+        route_slot: SLOTS.includes(route_slot) ? route_slot : "ANY",
         vehicle_id: createForm.vehicle_id || null,
+        notes: createForm.notes || "",
+        staff_ids: Array.isArray(createForm.staff_ids) ? createForm.staff_ids : [],
       };
+
       if (!payload.route_area) throw new Error("Route area is required");
 
       const res = await fetch("/api/ops/daily-runs", {
@@ -111,6 +124,7 @@ export default function OpsDailyRunsPage() {
       setCreateForm((s) => ({
         ...s,
         route_area: "",
+        route_slot: "ANY",
         vehicle_id: "",
         notes: "",
         staff_ids: [],
@@ -124,14 +138,16 @@ export default function OpsDailyRunsPage() {
   }
 
   function openEdit(run) {
-    const staff_ids =
-      Array.isArray(run.daily_run_staff) ? run.daily_run_staff.map((x) => x.staff?.id).filter(Boolean) : [];
+    const staff_ids = Array.isArray(run.daily_run_staff)
+      ? run.daily_run_staff.map((x) => x.staff?.id).filter(Boolean)
+      : [];
 
     setEdit({
       id: run.id,
       run_date: run.run_date,
       route_day: run.route_day,
       route_area: run.route_area,
+      route_slot: (run.route_slot || "ANY").toString().toUpperCase(),
       vehicle_id: run.vehicle_id || "",
       notes: run.notes || "",
       staff_ids,
@@ -144,10 +160,14 @@ export default function OpsDailyRunsPage() {
     setSaving(true);
     setError("");
     try {
+      const route_area = (edit.route_area || "").toString().trim();
+      const route_slot = (edit.route_slot || "ANY").toString().toUpperCase();
+
       const payload = {
         run_date: edit.run_date,
         route_day: edit.route_day,
-        route_area: (edit.route_area || "").toString().trim(),
+        route_area,
+        route_slot: SLOTS.includes(route_slot) ? route_slot : "ANY",
         vehicle_id: edit.vehicle_id || null,
         notes: edit.notes || "",
         staff_ids: Array.isArray(edit.staff_ids) ? edit.staff_ids : [],
@@ -203,7 +223,9 @@ export default function OpsDailyRunsPage() {
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-slate-900">Ops • Daily Runs</h1>
-            <p className="text-sm text-slate-600">Define today’s vans/crews by date + area + vehicle + staff.</p>
+            <p className="text-sm text-slate-600">
+              Define vans/crews by date + area + vehicle + staff + slot (AM/PM/ANY).
+            </p>
           </div>
 
           <div className="flex gap-2">
@@ -245,7 +267,7 @@ export default function OpsDailyRunsPage() {
         <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <div className="mb-3 text-sm font-semibold text-slate-900">Create run</div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
             <div>
               <label className="text-xs font-semibold text-slate-600">Route day</label>
               <select
@@ -266,9 +288,24 @@ export default function OpsDailyRunsPage() {
               <input
                 value={createForm.route_area}
                 onChange={(e) => setCreateForm((s) => ({ ...s, route_area: e.target.value }))}
-                placeholder="e.g. Newport / Porthcawl"
+                placeholder="e.g. Porthcawl"
                 className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
               />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600">Slot</label>
+              <select
+                value={createForm.route_slot}
+                onChange={(e) => setCreateForm((s) => ({ ...s, route_slot: e.target.value }))}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              >
+                {SLOTS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -302,7 +339,7 @@ export default function OpsDailyRunsPage() {
               </button>
             </div>
 
-            <div className="md:col-span-4">
+            <div className="md:col-span-5">
               <label className="text-xs font-semibold text-slate-600">Staff on this run</label>
               <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {activeStaff.map((s) => {
@@ -324,7 +361,7 @@ export default function OpsDailyRunsPage() {
               </div>
             </div>
 
-            <div className="md:col-span-4">
+            <div className="md:col-span-5">
               <label className="text-xs font-semibold text-slate-600">Notes</label>
               <input
                 value={createForm.notes}
@@ -348,23 +385,22 @@ export default function OpsDailyRunsPage() {
         ) : (
           <div className="space-y-2 pb-10">
             {runs.map((r) => {
-              const staffList =
-                Array.isArray(r.daily_run_staff) ? r.daily_run_staff.map((x) => x.staff?.name).filter(Boolean) : [];
+              const staffList = Array.isArray(r.daily_run_staff)
+                ? r.daily_run_staff.map((x) => x.staff?.name).filter(Boolean)
+                : [];
               const vehicleLabel = r.vehicles
                 ? `${r.vehicles.registration}${r.vehicles.name ? ` • ${r.vehicles.name}` : ""}`
                 : "— no vehicle —";
 
               return (
-                <button
+                <div
                   key={r.id}
-                  type="button"
-                  onClick={() => openEdit(r)}
-                  className="w-full rounded-2xl bg-white p-4 text-left shadow-sm ring-1 ring-slate-200 hover:bg-slate-50"
+                  className="w-full rounded-2xl bg-white p-4 text-left shadow-sm ring-1 ring-slate-200"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-base font-semibold text-slate-900">
-                        {r.route_area} • {r.route_day}
+                        {r.route_area} • {r.route_day} • {String(r.route_slot || "ANY").toUpperCase()}
                       </div>
                       <div className="mt-1 text-sm text-slate-600">
                         <span className="font-medium text-slate-700">{vehicleLabel}</span>
@@ -374,9 +410,23 @@ export default function OpsDailyRunsPage() {
                       {r.notes ? <div className="mt-1 text-xs text-slate-500">{r.notes}</div> : null}
                     </div>
 
-                    <div className="shrink-0 text-sm font-semibold text-slate-500">Edit</div>
+                    <div className="shrink-0 flex gap-2">
+                      <Link
+                        href={`/ops/run/${r.id}`}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-sm hover:bg-slate-50"
+                      >
+                        Open
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => openEdit(r)}
+                        className="rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-900"
+                      >
+                        Edit
+                      </button>
+                    </div>
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -440,6 +490,21 @@ export default function OpsDailyRunsPage() {
                   onChange={(e) => setEdit((s) => ({ ...s, route_area: e.target.value }))}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
                 />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-600">Slot</label>
+                <select
+                  value={edit.route_slot}
+                  onChange={(e) => setEdit((s) => ({ ...s, route_slot: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                >
+                  {SLOTS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div>
@@ -522,6 +587,10 @@ export default function OpsDailyRunsPage() {
               >
                 Delete
               </button>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-500">
+              Slot matching: Run AM includes subscribers AM + ANY + blank. Run PM includes PM + ANY + blank.
             </div>
           </div>
         </div>
