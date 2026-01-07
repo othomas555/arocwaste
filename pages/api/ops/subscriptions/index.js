@@ -14,7 +14,12 @@ export default async function handler(req, res) {
   }
 
   const supabase = getSupabaseAdmin();
-  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
+  if (!supabase) {
+    return res.status(500).json({
+      error:
+        "Supabase admin client not configured. Check env vars for service role key in Vercel (SUPABASE_SERVICE_ROLE_KEY / SUPABASE_URL used by lib/supabaseAdmin).",
+    });
+  }
 
   try {
     const q = String(req.query.q || "").trim();
@@ -23,39 +28,13 @@ export default async function handler(req, res) {
 
     let query = supabase
       .from("subscriptions")
-      .select(
-        [
-          "id",
-          "status",
-          "email",
-          "name",
-          "phone",
-          "postcode",
-          "address",
-          "frequency",
-          "extra_bags",
-          "use_own_bin",
-          "route_area",
-          "route_day",
-          "route_slot",
-          "next_collection_date",
-          "anchor_date",
-          "pause_until",
-          "paused_reason",
-          "paused_at",
-          "created_at",
-          "stripe_customer_id",
-          "stripe_subscription_id",
-        ].join(",")
-      )
+      .select("*")
       .order("created_at", { ascending: false })
       .limit(limit);
 
     if (status) query = query.eq("status", status);
 
     if (q) {
-      // simple search over common fields
-      // Supabase OR: field.ilike.%q%
       const like = `%${q.replace(/%/g, "")}%`;
       query = query.or(
         [
