@@ -1,257 +1,489 @@
-import { useEffect, useMemo, useState } from "react";
+// pages/ops/subscribers.js
+import { useMemo, useState } from "react";
+import Link from "next/link";
 
-function cx(...classes) {
-  return classes.filter(Boolean).join(" ");
+function classNames(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
-const STATUS_PRESETS = [
-  { key: "", label: "All" },
-  { key: "active", label: "Active" },
-  { key: "trialing", label: "Trialing" },
-  { key: "paused", label: "Paused" },
-  { key: "hold", label: "Hold (unpaid)" },
-  { key: "past_due", label: "Past due" },
-  { key: "unpaid", label: "Unpaid" },
-  { key: "canceled", label: "Canceled" },
+const FREQUENCIES = [
+  { value: "weekly", label: "Weekly" },
+  { value: "fortnightly", label: "Fortnightly" },
+  { value: "threeweekly", label: "3-weekly" },
 ];
 
-function badgeClass(status) {
-  const s = String(status || "").toLowerCase();
-  if (s === "active" || s === "trialing") return "bg-emerald-50 text-emerald-800 ring-emerald-200";
-  if (["hold", "past_due", "unpaid"].includes(s))
-    return "bg-red-50 text-red-800 ring-red-200";
-  if (s === "paused") return "bg-amber-50 text-amber-800 ring-amber-200";
-  return "bg-slate-100 text-slate-700 ring-slate-200";
+const STATUSES = ["", "active", "pending", "paused", "cancelled", "inactive"];
+
+function formatYMD(d) {
+  if (!d) return "";
+  return String(d).slice(0, 10);
 }
 
-export default function OpsSubscribersPage() {
+export default function OpsSubscribers({ initial }) {
+  const [rows, setRows] = useState(initial || []);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [edit, setEdit] = useState(null); // current row
 
-  const [form, setForm] = useState({
-    id: "",
-    postcode: "",
-    address: "",
-    frequency: "",
-    extra_bags: 0,
-    use_own_bin: false,
-    route_day: "",
-    route_area: "",
-    route_override: false,
-    route_override_reason: "",
-    next_collection_date: "",
-    pause_from: "",
-    pause_to: "",
-    status: "",
-    ops_notes: "",
-  });
+  const filtered = useMemo(() => {
+    // client-side filter for instant UX; server fetch used by Refresh
+    const qq = q.trim().toLowerCase();
+    return (rows || []).filter((r) => {
+      if (status && String(r.status || "").toLowerCase() !== status) return false;
+      if (!qq) return true;
+      const hay = [
+        r.email,
+        r.name,
+        r.phone,
+        r.postcode,
+        r.address,
+        r.route_area,
+        r.route_day,
+        r.route_slot,
+        r.frequency,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(qq);
+    });
+  }, [rows, q, status]);
 
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  async function load() {
-    setLoading(true);
+  async function refresh() {
     setError("");
+    setLoading(true);
     try {
       const params = new URLSearchParams();
       if (q.trim()) params.set("q", q.trim());
       if (status) params.set("status", status);
+      params.set("limit", "300");
 
-      const res = await fetch(`/api/ops/subscribers?${params.toString()}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load subscribers");
-      setRows(Array.isArray(data?.subscribers) ? data.subscribers : []);
+      const res = await fetch(`/api/ops/subscriptions?${params.toString()}`);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to load");
+      setRows(json.data || []);
     } catch (e) {
-      setError(e.message || "Something went wrong");
+      setError(e?.message || "Failed to load");
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    load();
-  }, [refreshKey]);
-
-  const totals = useMemo(() => {
-    return {
-      total: rows.length,
-      activeCount: rows.filter((r) => ["active", "trialing"].includes(r.status)).length,
-      holdCount: rows.filter((r) =>
-        ["hold", "past_due", "unpaid"].includes(r.status)
-      ).length,
-    };
-  }, [rows]);
-
-  function openEditor(r) {
-    setForm({
+  function openEdit(r) {
+    setError("");
+    setEdit({
       id: r.id,
+      email: r.email || "",
+      name: r.name || "",
+      phone: r.phone || "",
       postcode: r.postcode || "",
       address: r.address || "",
-      frequency: r.frequency || "",
-      extra_bags: Number(r.extra_bags) || 0,
+      status: r.status || "pending",
+      frequency: r.frequency || "weekly",
+      extra_bags: Number(r.extra_bags || 0),
       use_own_bin: !!r.use_own_bin,
-      route_day: r.route_day || "",
       route_area: r.route_area || "",
-      route_override: !!r.route_override,
-      route_override_reason: r.route_override_reason || "",
-      next_collection_date: r.next_collection_date || "",
-      pause_from: r.pause_from || "",
-      pause_to: r.pause_to || "",
-      status: r.status || "",
-      ops_notes: r.ops_notes || "",
+      route_day: r.route_day || "",
+      route_slot: r.route_slot || "",
+      next_collection_date: formatYMD(r.next_collection_date),
+      anchor_date: formatYMD(r.anchor_date),
+      pause_until: formatYMD(r.pause_until),
+      paused_reason: r.paused_reason || "",
     });
-    setDrawerOpen(true);
+    setOpen(true);
   }
 
-  async function save() {
+  async function saveEdit() {
+    if (!edit?.id) return;
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/ops/subscribers", {
-        method: "PATCH",
+      const res = await fetch(`/api/ops/subscriptions/${encodeURIComponent(edit.id)}`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to save subscriber");
+        body: JSON.stringify({
+          // editable fields
+          status: edit.status,
+          frequency: edit.frequency,
+          extra_bags: Number(edit.extra_bags || 0),
 
-      setDrawerOpen(false);
-      setRefreshKey((k) => k + 1);
+          name: edit.name,
+          phone: edit.phone,
+          postcode: edit.postcode,
+          address: edit.address,
+
+          route_area: edit.route_area,
+          route_day: edit.route_day,
+          route_slot: edit.route_slot,
+
+          next_collection_date: edit.next_collection_date || null,
+          anchor_date: edit.anchor_date || null,
+
+          pause_until: edit.pause_until || null,
+          paused_reason: edit.paused_reason || null,
+        }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Save failed");
+
+      // patch local list
+      const updated = json.data;
+      setRows((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)));
+      setOpen(false);
+      setEdit(null);
     } catch (e) {
-      setError(e.message || "Save failed");
+      setError(e?.message || "Save failed");
     } finally {
       setSaving(false);
     }
   }
 
-  async function applyRouteRules(dryRun) {
-    const res = await fetch("/api/ops/apply-route-rules", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dryRun }),
-    });
-    const data = await res.json();
-    alert(
-      dryRun
-        ? `Dry run:\nWill update ${data.toUpdate} subscribers\nSkipped: ${data.skipped}\nNo match: ${data.noMatch}`
-        : `Applied route rules to ${data.applied} subscribers`
-    );
-    if (!dryRun) setRefreshKey((k) => k + 1);
-  }
-
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-5xl px-3 py-4">
-        <h1 className="text-xl font-semibold">Ops • Subscribers</h1>
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-7xl px-4 py-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Subscribers</h1>
+            <p className="text-sm text-gray-600">
+              View and edit customer subscriptions (frequency, bags, route, dates).
+            </p>
+          </div>
 
-        <div className="my-3 flex gap-2">
-          <button
-            onClick={() => applyRouteRules(true)}
-            className="rounded-xl border bg-white px-3 py-2 text-sm"
-          >
-            Dry run route rules
-          </button>
-          <button
-            onClick={() => applyRouteRules(false)}
-            className="rounded-xl bg-black px-3 py-2 text-sm text-white"
-          >
-            Apply route rules
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/ops/dashboard"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
+              Back to dashboard
+            </Link>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading}
+              className={classNames(
+                "rounded-lg px-3 py-2 text-sm font-semibold",
+                loading ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
+              )}
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
         </div>
 
-        {rows.map((r) => (
-          <button
-            key={r.id}
-            onClick={() => openEditor(r)}
-            className="mb-2 w-full rounded-xl bg-white p-3 text-left shadow-sm ring-1 ring-slate-200"
-          >
-            <div className="font-semibold">{r.address}</div>
-            <div className="text-sm text-slate-600">
-              {r.postcode} • {r.route_area} • {r.route_day}
-              {r.route_override && (
-                <span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
-                  ROUTE OVERRIDDEN
-                </span>
-              )}
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {drawerOpen && (
-        <div className="fixed inset-0 bg-black/40 p-4">
-          <div className="mx-auto max-w-3xl rounded-xl bg-white p-4">
-            <h2 className="font-semibold">Edit subscriber</h2>
-
-            <label className="mt-3 flex items-center gap-2 text-sm">
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
               <input
-                type="checkbox"
-                checked={form.route_override}
-                onChange={(e) =>
-                  setForm({ ...form, route_override: e.target.checked })
-                }
-              />
-              Override route rules
-            </label>
-
-            {form.route_override && (
-              <input
-                value={form.route_override_reason}
-                onChange={(e) =>
-                  setForm({ ...form, route_override_reason: e.target.value })
-                }
-                placeholder="Reason for override"
-                className="mt-2 w-full rounded border px-2 py-1 text-sm"
-              />
-            )}
-
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <input
-                value={form.route_area}
-                onChange={(e) =>
-                  setForm({ ...form, route_area: e.target.value })
-                }
-                disabled={!form.route_override}
-                placeholder="Route area"
-                className="rounded border px-2 py-1"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search email, postcode, area, name…"
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 sm:max-w-md"
               />
               <select
-                value={form.route_day}
-                onChange={(e) =>
-                  setForm({ ...form, route_day: e.target.value })
-                }
-                disabled={!form.route_override}
-                className="rounded border px-2 py-1"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 sm:max-w-xs"
               >
-                <option value="">—</option>
-                {["Monday","Tuesday","Wednesday","Thursday","Friday"].map((d)=>(
-                  <option key={d}>{d}</option>
+                {STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s ? `Status: ${s}` : "All statuses"}
+                  </option>
                 ))}
               </select>
             </div>
+            <div className="text-xs text-gray-500">{filtered.length} shown</div>
+          </div>
 
-            <div className="mt-4 flex gap-2">
-              <button
-                onClick={save}
-                className="rounded bg-emerald-600 px-4 py-2 text-white"
-              >
-                Save
-              </button>
-              <button
-                onClick={() => setDrawerOpen(false)}
-                className="rounded border px-4 py-2"
-              >
-                Cancel
-              </button>
+          {error ? (
+            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              {error}
             </div>
+          ) : null}
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-[1200px] w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-600">
+                <tr>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="px-3 py-2 text-left">Email</th>
+                  <th className="px-3 py-2 text-left">Postcode</th>
+                  <th className="px-3 py-2 text-left">Frequency</th>
+                  <th className="px-3 py-2 text-left">Bags</th>
+                  <th className="px-3 py-2 text-left">Route</th>
+                  <th className="px-3 py-2 text-left">Next</th>
+                  <th className="px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {filtered.length ? (
+                  filtered.map((r) => (
+                    <tr key={r.id} className="bg-white">
+                      <td className="px-3 py-2">
+                        <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
+                          {r.status || "—"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-gray-900">{r.email || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{r.postcode || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{r.frequency || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{Number(r.extra_bags || 0)}</td>
+                      <td className="px-3 py-2 text-gray-900">
+                        {r.route_area ? (
+                          <>
+                            {r.route_area} • {r.route_day || "—"}{" "}
+                            {r.route_slot ? `• ${r.route_slot}` : ""}
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-gray-900">
+                        {r.next_collection_date ? formatYMD(r.next_collection_date) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => openEdit(r)}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                        >
+                          Edit
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={8}>
+                      No subscribers found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
-      )}
+
+        {/* Modal */}
+        {open && edit ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl">
+              <div className="border-b border-gray-200 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">Edit subscriber</div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      {edit.email} • {edit.postcode}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      setEdit(null);
+                    }}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Status</label>
+                    <input
+                      value={edit.status}
+                      onChange={(e) => setEdit({ ...edit, status: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="active / pending / paused / cancelled"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Frequency</label>
+                    <select
+                      value={edit.frequency}
+                      onChange={(e) => setEdit({ ...edit, frequency: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    >
+                      {FREQUENCIES.map((f) => (
+                        <option key={f.value} value={f.value}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={edit.extra_bags}
+                      onChange={(e) => setEdit({ ...edit, extra_bags: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Phone</label>
+                    <input
+                      value={edit.phone}
+                      onChange={(e) => setEdit({ ...edit, phone: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-gray-700">Address</label>
+                    <input
+                      value={edit.address}
+                      onChange={(e) => setEdit({ ...edit, address: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Postcode</label>
+                    <input
+                      value={edit.postcode}
+                      onChange={(e) => setEdit({ ...edit, postcode: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                    <div className="mt-1 text-xs text-gray-500">
+                      If postcode changes, you’ll likely want to reassign route via /ops/route-assign.
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Next collection</label>
+                    <input
+                      value={edit.next_collection_date}
+                      onChange={(e) => setEdit({ ...edit, next_collection_date: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route area</label>
+                    <input
+                      value={edit.route_area}
+                      onChange={(e) => setEdit({ ...edit, route_area: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="e.g. Porthcawl"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route day</label>
+                    <input
+                      value={edit.route_day}
+                      onChange={(e) => setEdit({ ...edit, route_day: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="e.g. Monday"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route slot</label>
+                    <input
+                      value={edit.route_slot}
+                      onChange={(e) => setEdit({ ...edit, route_slot: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="AM / PM / ANY"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Pause until</label>
+                    <input
+                      value={edit.pause_until}
+                      onChange={(e) => setEdit({ ...edit, pause_until: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-gray-700">Pause reason</label>
+                    <input
+                      value={edit.paused_reason}
+                      onChange={(e) => setEdit({ ...edit, paused_reason: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Optional"
+                    />
+                  </div>
+                </div>
+
+                {error ? (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                    {error}
+                  </div>
+                ) : null}
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      setEdit(null);
+                    }}
+                    disabled={saving}
+                    className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveEdit}
+                    disabled={saving}
+                    className={classNames(
+                      "rounded-lg px-4 py-2 text-sm font-semibold",
+                      saving ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
+                    )}
+                  >
+                    {saving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+
+                <div className="mt-3 text-xs text-gray-500">
+                  Note: This updates your Supabase record. If you also need to change the Stripe subscription price, we’ll add a
+                  “Change plan in Stripe” action next (step-by-step, no over-engineering).
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
+}
+
+export async function getServerSideProps(ctx) {
+  const proto = (ctx.req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+  const host = ctx.req.headers["x-forwarded-host"] || ctx.req.headers.host;
+  const baseUrl = `${proto}://${host}`;
+
+  try {
+    const res = await fetch(`${baseUrl}/api/ops/subscriptions?limit=200`, {
+      headers: {
+        authorization: ctx.req.headers.authorization || "",
+        cookie: ctx.req.headers.cookie || "",
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { props: { initial: [], _error: json?.error || "Failed to load" } };
+    return { props: { initial: json.data || [] } };
+  } catch (e) {
+    return { props: { initial: [], _error: e?.message || "Failed to load" } };
+  }
 }
