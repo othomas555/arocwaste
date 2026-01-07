@@ -1,3 +1,4 @@
+// pages/ops/run/[id].js
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -56,6 +57,10 @@ export default function OpsRunViewPage() {
     return `${v.registration}${v.name ? ` • ${v.name}` : ""}`;
   }, [run]);
 
+  const slotLabel = useMemo(() => {
+    return String(run?.route_slot || "ANY").toUpperCase();
+  }, [run]);
+
   async function markCollected(subscription_id) {
     setSavingId(subscription_id);
     setError("");
@@ -65,7 +70,6 @@ export default function OpsRunViewPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           subscription_id,
-          // some implementations also want date; harmless if ignored:
           collection_date: run?.run_date,
         }),
       });
@@ -107,7 +111,9 @@ export default function OpsRunViewPage() {
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-slate-900">Ops • Run</h1>
-            <p className="text-sm text-slate-600">Stops due for this run’s date + area + day.</p>
+            <p className="text-sm text-slate-600">
+              Stops due for this run’s date + area + day + slot.
+            </p>
           </div>
 
           <div className="flex gap-2">
@@ -142,7 +148,7 @@ export default function OpsRunViewPage() {
           <>
             <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
               <div className="text-base font-semibold text-slate-900">
-                {run.route_area} • {run.route_day}
+                {run.route_area} • {run.route_day} • {slotLabel}
               </div>
               <div className="mt-1 text-sm text-slate-600">
                 <span className="font-medium text-slate-700">{run.run_date}</span>
@@ -163,16 +169,20 @@ export default function OpsRunViewPage() {
                 </div>
               </div>
 
+              <div className="mt-3 text-xs text-slate-500">
+                Slot matching: AM run includes subscribers AM + ANY + blank. PM run includes PM + ANY + blank. ANY includes all.
+              </div>
+
               {run.notes ? <div className="mt-3 text-sm text-slate-600">{run.notes}</div> : null}
             </div>
 
             {stops.length === 0 ? (
               <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
                 <div className="text-sm text-slate-700">
-                  No due stops match this run (date + route_area + route_day).
+                  No due stops match this run (date + route_area + route_day + slot).
                 </div>
                 <div className="mt-2 text-xs text-slate-500">
-                  Check subscriptions have route_day/route_area set and next_collection_date equals the run date.
+                  Check subscriptions have route_day/route_area/route_slot set and next_collection_date equals the run date.
                 </div>
               </div>
             ) : (
@@ -195,6 +205,8 @@ export default function OpsRunViewPage() {
                         </div>
                         <div className="mt-1 text-sm text-slate-600">
                           {s.postcode}
+                          <span className="mx-2 text-slate-300">•</span>
+                          Slot: <span className="font-semibold text-slate-800">{String(s.route_slot || "ANY").toUpperCase()}</span>
                           <span className="mx-2 text-slate-300">•</span>
                           Extra bags: <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
                           <span className="mx-2 text-slate-300">•</span>
