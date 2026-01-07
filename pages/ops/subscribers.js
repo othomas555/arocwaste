@@ -257,4 +257,342 @@ export default function OpsSubscribers({ initial }) {
                   <th className="px-3 py-2 text-left">Frequency</th>
                   <th className="px-3 py-2 text-left">Bags</th>
                   <th className="px-3 py-2 text-left">Route</th>
-                  <th className="px
+                  <th className="px-3 py-2 text-left">Next</th>
+                  <th className="px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {filtered.length ? (
+                  filtered.map((r) => (
+                    <tr key={r.id} className="bg-white">
+                      <td className="px-3 py-2">
+                        <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
+                          {r.status || "—"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={classNames(
+                            "rounded-md px-2 py-1 text-xs font-semibold",
+                            statusBadge(r.billing_alignment_status)
+                          )}
+                          title={r.billing_alignment_notes || ""}
+                        >
+                          {r.billing_alignment_status || "unknown"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-gray-900">{r.email || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{r.postcode || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{r.frequency || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{Number(r.extra_bags || 0)}</td>
+                      <td className="px-3 py-2 text-gray-900">
+                        {r.route_area ? (
+                          <>
+                            {r.route_area} • {r.route_day || "—"}{" "}
+                            {r.route_slot ? `• ${r.route_slot}` : ""}
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-gray-900">
+                        {r.next_collection_date ? formatYMD(r.next_collection_date) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => openEdit(r)}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                        >
+                          Edit
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={9}>
+                      No subscribers found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {open && edit ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl">
+              <div className="border-b border-gray-200 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">Edit subscriber</div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      {edit.email} • {edit.postcode}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      setEdit(null);
+                    }}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-gray-900">
+                      Billing alignment:{" "}
+                      <span
+                        className={classNames(
+                          "ml-1 rounded-md px-2 py-1 text-xs font-semibold",
+                          statusBadge(edit.billing_alignment_status)
+                        )}
+                      >
+                        {edit.billing_alignment_status || "unknown"}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => billingSync("check")}
+                        disabled={billingRunning}
+                        className={classNames(
+                          "rounded-lg px-3 py-1.5 text-xs font-semibold",
+                          billingRunning
+                            ? "bg-gray-300 text-gray-600"
+                            : "bg-gray-900 text-white hover:bg-black"
+                        )}
+                      >
+                        {billingRunning ? "Working…" : "Check Stripe"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => billingSync("apply")}
+                        disabled={billingRunning}
+                        className={classNames(
+                          "rounded-lg px-3 py-1.5 text-xs font-semibold",
+                          billingRunning
+                            ? "bg-gray-300 text-gray-600"
+                            : "bg-emerald-600 text-white hover:bg-emerald-700"
+                        )}
+                      >
+                        {billingRunning ? "Working…" : "Apply to Stripe"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 text-xs text-gray-600">
+                    “Apply to Stripe” updates the customer’s Stripe subscription items to match the
+                    frequency + extra bags in Supabase (with prorations).
+                  </div>
+
+                  {billingResult ? (
+                    <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-800">
+                      <div className="font-semibold">
+                        Result: {billingResult.aligned ? "✅ aligned" : "⚠️ mismatch"}
+                      </div>
+                      {billingResult.notes?.length ? (
+                        <ul className="mt-2 list-disc pl-5">
+                          {billingResult.notes.map((n, i) => (
+                            <li key={i}>{n}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* EDIT FORM */}
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Status</label>
+                    <input
+                      value={edit.status}
+                      onChange={(e) => setEdit({ ...edit, status: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="active / pending / paused / cancelled"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Frequency</label>
+                    <select
+                      value={edit.frequency}
+                      onChange={(e) => setEdit({ ...edit, frequency: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    >
+                      {FREQUENCIES.map((f) => (
+                        <option key={f.value} value={f.value}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={edit.extra_bags}
+                      onChange={(e) => setEdit({ ...edit, extra_bags: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Phone</label>
+                    <input
+                      value={edit.phone}
+                      onChange={(e) => setEdit({ ...edit, phone: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-gray-700">Address</label>
+                    <input
+                      value={edit.address}
+                      onChange={(e) => setEdit({ ...edit, address: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Postcode</label>
+                    <input
+                      value={edit.postcode}
+                      onChange={(e) => setEdit({ ...edit, postcode: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Next collection</label>
+                    <input
+                      value={edit.next_collection_date}
+                      onChange={(e) => setEdit({ ...edit, next_collection_date: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route area</label>
+                    <input
+                      value={edit.route_area}
+                      onChange={(e) => setEdit({ ...edit, route_area: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route day</label>
+                    <input
+                      value={edit.route_day}
+                      onChange={(e) => setEdit({ ...edit, route_day: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Route slot</label>
+                    <input
+                      value={edit.route_slot}
+                      onChange={(e) => setEdit({ ...edit, route_slot: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="AM / PM / ANY"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Pause until</label>
+                    <input
+                      value={edit.pause_until}
+                      onChange={(e) => setEdit({ ...edit, pause_until: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-gray-700">Pause reason</label>
+                    <input
+                      value={edit.paused_reason}
+                      onChange={(e) => setEdit({ ...edit, paused_reason: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+
+                {error ? (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                    {error}
+                  </div>
+                ) : null}
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      setEdit(null);
+                    }}
+                    disabled={saving}
+                    className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveEdit}
+                    disabled={saving}
+                    className={classNames(
+                      "rounded-lg px-4 py-2 text-sm font-semibold",
+                      saving ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
+                    )}
+                  >
+                    {saving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+
+                <div className="mt-3 text-xs text-gray-500">
+                  Ops workflow: change frequency/bags → Save → Check Stripe → Apply to Stripe if mismatch.
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export async function getServerSideProps(ctx) {
+  const proto = (ctx.req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+  const host = ctx.req.headers["x-forwarded-host"] || ctx.req.headers.host;
+  const baseUrl = `${proto}://${host}`;
+
+  try {
+    const res = await fetch(`${baseUrl}/api/ops/subscriptions?limit=200`, {
+      headers: {
+        authorization: ctx.req.headers.authorization || "",
+        cookie: ctx.req.headers.cookie || "",
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { props: { initial: [], _error: json?.error || "Failed to load" } };
+    return { props: { initial: json.data || [] } };
+  } catch (e) {
+    return { props: { initial: [], _error: e?.message || "Failed to load" } };
+  }
+}
