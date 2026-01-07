@@ -1,191 +1,225 @@
-// pages/api/ops/billing-audit.js
-import Stripe from "stripe";
-import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+// pages/ops/billing.js
+import { useMemo, useState } from "react";
+import Link from "next/link";
 
-const secretKey = process.env.STRIPE_SECRET_KEY;
-
-function clampInt(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  return Math.max(min, Math.min(max, Math.trunc(x)));
+function classNames(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function pickPrices(frequency) {
-  const map = {
-    weekly: {
-      bin: process.env.STRIPE_PRICE_BIN_WEEKLY,
-      bag: process.env.STRIPE_PRICE_BAG_WEEKLY,
-    },
-    fortnightly: {
-      bin: process.env.STRIPE_PRICE_BIN_FORTNIGHTLY,
-      bag: process.env.STRIPE_PRICE_BAG_FORTNIGHTLY,
-    },
-    threeweekly: {
-      bin: process.env.STRIPE_PRICE_BIN_THREEWEEKLY,
-      bag: process.env.STRIPE_PRICE_BAG_THREEWEEKLY,
-    },
-  };
-  return map[frequency] || null;
+function badge(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "ok") return "bg-emerald-100 text-emerald-800";
+  if (s === "mismatch") return "bg-amber-100 text-amber-800";
+  if (s === "error") return "bg-red-100 text-red-800";
+  return "bg-gray-100 text-gray-700";
 }
 
-function summarizeStripeItems(items) {
-  return (items || []).map((it) => ({
-    id: it.id,
-    price: it?.price?.id || null,
-    quantity: it.quantity ?? null,
-  }));
-}
+export default function OpsBilling({ initial, _error }) {
+  const [rows, setRows] = useState(initial || []);
+  const [loading, setLoading] = useState(false);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [error, setError] = useState(_error || "");
+  const [auditResult, setAuditResult] = useState(null);
 
-function computeExpected(frequency, extraBags) {
-  const prices = pickPrices(frequency);
-  if (!prices?.bin || !prices?.bag) return null;
+  const issues = useMemo(() => {
+    return (rows || []).filter((r) => String(r.billing_alignment_status || "unknown") !== "ok");
+  }, [rows]);
 
-  const expected = [{ kind: "bin", price: prices.bin, quantity: 1 }];
-
-  const bags = clampInt(extraBags ?? 0, 0, 10);
-  if (bags > 0) expected.push({ kind: "bags", price: prices.bag, quantity: bags });
-
-  return expected;
-}
-
-function compare(expected, stripeItems) {
-  const notes = [];
-  let ok = true;
-
-  const stripe = summarizeStripeItems(stripeItems);
-
-  const expBin = expected.find((x) => x.kind === "bin");
-  const expBags = expected.find((x) => x.kind === "bags");
-
-  const stripeBinMatch = stripe.find((s) => s.price === expBin.price);
-  if (!stripeBinMatch) {
-    ok = false;
-    notes.push(`Missing bin price ${expBin.price}`);
-  } else if (Number(stripeBinMatch.quantity || 0) !== 1) {
-    ok = false;
-    notes.push(`Bin qty ${stripeBinMatch.quantity} (expected 1)`);
-  }
-
-  if (expBags) {
-    const stripeBagMatch = stripe.find((s) => s.price === expBags.price);
-    if (!stripeBagMatch) {
-      ok = false;
-      notes.push(`Missing bag price ${expBags.price}`);
-    } else if (Number(stripeBagMatch.quantity || 0) !== expBags.quantity) {
-      ok = false;
-      notes.push(`Bag qty ${stripeBagMatch.quantity} (expected ${expBags.quantity})`);
-    }
-  } else {
-    // expect no bags -> if any known bag price exists, mismatch
-    const bagPrices = new Set(
-      [
-        process.env.STRIPE_PRICE_BAG_WEEKLY,
-        process.env.STRIPE_PRICE_BAG_FORTNIGHTLY,
-        process.env.STRIPE_PRICE_BAG_THREEWEEKLY,
-      ].filter(Boolean)
-    );
-    const hasBags = stripe.some((s) => s.price && bagPrices.has(s.price));
-    if (hasBags) {
-      ok = false;
-      notes.push("Stripe has recurring bags but Supabase expects 0");
+  async function refresh() {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/ops/subscriptions?limit=300");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || `Failed to load (${res.status})`);
+      setRows(json.data || []);
+    } catch (e) {
+      setError(e?.message || "Failed to load");
+    } finally {
+      setLoading(false);
     }
   }
 
-  // unexpected recurring items
-  const expectedPriceSet = new Set(expected.map((e) => e.price));
-  const unexpected = stripe.filter((s) => s.price && !expectedPriceSet.has(s.price));
-  if (unexpected.length) {
-    ok = false;
-    notes.push(`Unexpected item(s): ${unexpected.map((u) => u.price).join(", ")}`);
+  async function runAudit() {
+    setError("");
+    setAuditLoading(true);
+    setAuditResult(null);
+    try {
+      const res = await fetch("/api/ops/billing-audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 50 }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || `Audit failed (${res.status})`);
+      setAuditResult(json);
+      await refresh();
+    } catch (e) {
+      setError(e?.message || "Audit failed");
+    } finally {
+      setAuditLoading(false);
+    }
   }
 
-  return { ok, notes, stripeSummary: stripe };
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-7xl px-4 py-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Billing audit</h1>
+            <p className="text-sm text-gray-600">
+              Check Supabase frequency/bags align with Stripe subscription items.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/ops/dashboard"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
+              Back to dashboard
+            </Link>
+
+            <Link
+              href="/ops/subscribers"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
+              Subscribers
+            </Link>
+
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading}
+              className={classNames(
+                "rounded-lg px-3 py-2 text-sm font-semibold",
+                loading ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
+              )}
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+
+            <button
+              type="button"
+              onClick={runAudit}
+              disabled={auditLoading}
+              className={classNames(
+                "rounded-lg px-3 py-2 text-sm font-semibold",
+                auditLoading
+                  ? "bg-gray-300 text-gray-600"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700"
+              )}
+            >
+              {auditLoading ? "Checking…" : "Run audit (50)"}
+            </button>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            <div className="font-semibold">Billing audit page error</div>
+            <div className="mt-1">{error}</div>
+          </div>
+        ) : null}
+
+        {auditResult ? (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-900">
+            <div className="font-semibold">Audit result</div>
+            <div className="mt-1 text-xs text-gray-600">Checked: {auditResult.checked}</div>
+          </div>
+        ) : null}
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-gray-900">Needs attention</div>
+            <div className="text-xs text-gray-500">{issues.length} issue(s)</div>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-[1100px] w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-600">
+                <tr>
+                  <th className="px-3 py-2 text-left">Billing</th>
+                  <th className="px-3 py-2 text-left">Email</th>
+                  <th className="px-3 py-2 text-left">Frequency</th>
+                  <th className="px-3 py-2 text-left">Bags</th>
+                  <th className="px-3 py-2 text-left">Checked</th>
+                  <th className="px-3 py-2 text-left">Notes</th>
+                  <th className="px-3 py-2 text-right">Fix</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {issues.length ? (
+                  issues.map((r) => (
+                    <tr key={r.id} className="bg-white">
+                      <td className="px-3 py-2">
+                        <span
+                          className={classNames(
+                            "rounded-md px-2 py-1 text-xs font-semibold",
+                            badge(r.billing_alignment_status)
+                          )}
+                          title={r.billing_alignment_notes || ""}
+                        >
+                          {r.billing_alignment_status || "unknown"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-gray-900">{r.email || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{r.frequency || "—"}</td>
+                      <td className="px-3 py-2 text-gray-900">{Number(r.extra_bags || 0)}</td>
+                      <td className="px-3 py-2 text-xs text-gray-700">
+                        {r.billing_alignment_checked_at
+                          ? String(r.billing_alignment_checked_at).slice(0, 19).replace("T", " ")
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-700">
+                        {r.billing_alignment_notes || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <Link
+                          href="/ops/subscribers"
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                        >
+                          Open Subscribers
+                        </Link>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={7}>
+                      No billing issues found 🎉
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-3 text-xs text-gray-500">
+            Fix workflow: open subscriber → Check Stripe → Apply to Stripe.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-async function writeStatus(supabase, id, status, notes) {
-  await supabase
-    .from("subscriptions")
-    .update({
-      billing_alignment_status: status,
-      billing_alignment_checked_at: new Date().toISOString(),
-      billing_alignment_notes: notes ? String(notes).slice(0, 2000) : null,
-    })
-    .eq("id", id);
-}
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  if (!secretKey || !secretKey.startsWith("sk_")) {
-    return res.status(500).json({ error: "Missing or invalid STRIPE_SECRET_KEY" });
-  }
-
-  const supabase = getSupabaseAdmin();
-  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
-
-  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
-
-  const limit = clampInt(req.body?.limit ?? 50, 1, 200);
+export async function getServerSideProps(ctx) {
+  const proto = (ctx.req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+  const host = ctx.req.headers["x-forwarded-host"] || ctx.req.headers.host;
+  const baseUrl = `${proto}://${host}`;
 
   try {
-    // Pull candidates: not ok OR never checked
-    const { data: subs, error } = await supabase
-      .from("subscriptions")
-      .select("id,email,frequency,extra_bags,status,stripe_subscription_id,billing_alignment_status,billing_alignment_checked_at")
-      .in("status", ["active", "pending", "paused"])
-      .order("billing_alignment_checked_at", { ascending: true, nullsFirst: true })
-      .limit(limit);
-
-    if (error) return res.status(500).json({ error: error.message });
-
-    const results = [];
-    for (const s of subs || []) {
-      const expected = computeExpected(s.frequency, s.extra_bags);
-      if (!expected) {
-        await writeStatus(supabase, s.id, "error", "Missing price mapping for frequency");
-        results.push({ id: s.id, email: s.email, status: "error", notes: ["Missing price mapping"] });
-        continue;
-      }
-
-      if (!s.stripe_subscription_id || !String(s.stripe_subscription_id).startsWith("sub_")) {
-        await writeStatus(supabase, s.id, "error", "Missing stripe_subscription_id");
-        results.push({ id: s.id, email: s.email, status: "error", notes: ["Missing stripe_subscription_id"] });
-        continue;
-      }
-
-      try {
-        const stripeSub = await stripe.subscriptions.retrieve(s.stripe_subscription_id, {
-          expand: ["items.data.price"],
-        });
-
-        const cmp = compare(expected, stripeSub?.items?.data || []);
-        const st = cmp.ok ? "ok" : "mismatch";
-        await writeStatus(supabase, s.id, st, cmp.notes.join(" | "));
-
-        results.push({
-          id: s.id,
-          email: s.email,
-          aligned: cmp.ok,
-          status: st,
-          notes: cmp.notes,
-        });
-      } catch (e) {
-        await writeStatus(supabase, s.id, "error", e?.message || "Stripe retrieve failed");
-        results.push({
-          id: s.id,
-          email: s.email,
-          aligned: false,
-          status: "error",
-          notes: [e?.message || "Stripe retrieve failed"],
-        });
-      }
-    }
-
-    return res.status(200).json({ ok: true, checked: results.length, results });
+    const res = await fetch(`${baseUrl}/api/ops/subscriptions?limit=300`, {
+      headers: {
+        authorization: ctx.req.headers.authorization || "",
+        cookie: ctx.req.headers.cookie || "",
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { props: { initial: [], _error: json?.error || "Failed to load" } };
+    return { props: { initial: json.data || [], _error: "" } };
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Audit failed" });
+    return { props: { initial: [], _error: e?.message || "Failed to load" } };
   }
 }
