@@ -1,65 +1,70 @@
+// pages/api/ops/daily-runs/[id].js
 import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
-function normStr(s) {
-  return (s || "").toString().trim();
-}
-function isYMD(s) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+const SLOTS = new Set(["ANY", "AM", "PM"]);
+function normSlot(v) {
+  const s = String(v || "ANY").toUpperCase().trim();
+  return SLOTS.has(s) ? s : "ANY";
 }
 
 export default async function handler(req, res) {
   const supabase = getSupabaseAdmin();
-  const { id } = req.query;
+  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
 
-  if (!id || typeof id !== "string") {
-    return res.status(400).json({ error: "Missing id" });
-  }
+  const id = String(req.query.id || "");
+  if (!id) return res.status(400).json({ error: "Missing id" });
 
-  // PUT: update run fields AND replace staff assignment in one call
   if (req.method === "PUT") {
     try {
       const body = req.body || {};
-      const patch = {};
+      const run_date = String(body.run_date || "").slice(0, 10);
+      const route_day = String(body.route_day || "");
+      const route_area = String(body.route_area || "").trim();
+      const route_slot = normSlot(body.route_slot);
+      const vehicle_id = body.vehicle_id || null;
+      const notes = String(body.notes || "");
+      const staff_ids = Array.isArray(body.staff_ids) ? body.staff_ids : [];
 
-      if (body.run_date !== undefined) {
-        if (!isYMD(body.run_date)) return res.status(400).json({ error: "run_date must be YYYY-MM-DD" });
-        patch.run_date = normStr(body.run_date);
-      }
-      if (body.route_day !== undefined) patch.route_day = normStr(body.route_day);
-      if (body.route_area !== undefined) patch.route_area = normStr(body.route_area);
-      if (body.vehicle_id !== undefined) patch.vehicle_id = body.vehicle_id ? normStr(body.vehicle_id) : null;
-      if (body.notes !== undefined) patch.notes = (body.notes || "").toString();
+      if (!run_date) return res.status(400).json({ error: "run_date required" });
+      if (!route_day) return res.status(400).json({ error: "route_day required" });
+      if (!route_area) return res.status(400).json({ error: "route_area required" });
 
-      // Update run core fields (if any)
-      if (Object.keys(patch).length) {
-        const { error: upErr } = await supabase.from("daily_runs").update(patch).eq("id", id);
-        if (upErr) return res.status(400).json({ error: upErr.message });
-      }
+      const { error: eUpd } = await supabase
+        .from("daily_runs")
+        .update({ run_date, route_day, route_area, route_slot, vehicle_id, notes })
+        .eq("id", id);
 
-      // Replace staff assignments if staff_ids provided
-      if (body.staff_ids !== undefined) {
-        const staff_ids = Array.isArray(body.staff_ids) ? body.staff_ids.map(normStr).filter(Boolean) : [];
+      if (eUpd) return res.status(500).json({ error: eUpd.message });
 
-        const { error: delErr } = await supabase.from("daily_run_staff").delete().eq("run_id", id);
-        if (delErr) return res.status(400).json({ error: delErr.message });
+      // reset staff assignments (simple + reliable)
+      const { error: eDel } = await supabase.from("daily_run_staff").delete().eq("daily_run_id", id);
+      if (eDel) return res.status(500).json({ error: eDel.message });
 
-        if (staff_ids.length) {
-          const inserts = staff_ids.map((sid) => ({ run_id: id, staff_id: sid }));
-          const { error: insErr } = await supabase.from("daily_run_staff").insert(inserts);
-          if (insErr) return res.status(400).json({ error: insErr.message });
-        }
+      if (staff_ids.length) {
+        const rows = staff_ids.map((sid) => ({ daily_run_id: id, staff_id: sid }));
+        const { error: eIns } = await supabase.from("daily_run_staff").insert(rows);
+        if (eIns) return res.status(500).json({ error: eIns.message });
       }
 
       return res.status(200).json({ ok: true });
     } catch (e) {
-      return res.status(500).json({ error: e.message || "Server error" });
+      return res.status(500).json({ error: e?.message || "Save failed" });
     }
   }
 
   if (req.method === "DELETE") {
-    const { error } = await supabase.from("daily_runs").delete().eq("id", id);
-    if (error) return res.status(400).json({ error: error.message });
-    return res.status(200).json({ ok: true });
+    try {
+      // staff rows first
+      const { error: eDelStaff } = await supabase.from("daily_run_staff").delete().eq("daily_run_id", id);
+      if (eDelStaff) return res.status(500).json({ error: eDelStaff.message });
+
+      const { error: eDelRun } = await supabase.from("daily_runs").delete().eq("id", id);
+      if (eDelRun) return res.status(500).json({ error: eDelRun.message });
+
+      return res.status(200).json({ ok: true });
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || "Delete failed" });
+    }
   }
 
   res.setHeader("Allow", "PUT, DELETE");
