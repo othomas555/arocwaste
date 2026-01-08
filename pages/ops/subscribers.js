@@ -1,54 +1,101 @@
 // pages/ops/subscribers.js
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { supabaseClient } from "../../lib/supabaseClient";
 
-function classNames(...xs) {
-  return xs.filter(Boolean).join(" ");
-}
+const FREQUENCY_TO_DAYS = {
+  weekly: 7,
+  fortnightly: 14,
+  "three-weekly": 21,
+};
 
-const FREQUENCIES = [
-  { value: "weekly", label: "Weekly" },
-  { value: "fortnightly", label: "Fortnightly" },
-  { value: "threeweekly", label: "3-weekly" },
+const ROUTE_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const ROUTE_SLOTS = [
+  { value: "", label: "(blank)" },
+  { value: "ANY", label: "ANY" },
+  { value: "AM", label: "AM" },
+  { value: "PM", label: "PM" },
 ];
 
-const STATUSES = ["", "active", "pending", "paused", "cancelled", "inactive"];
-
-function formatYMD(d) {
-  if (!d) return "";
-  return String(d).slice(0, 10);
+function cx(...classes) {
+  return classes.filter(Boolean).join(" ");
 }
 
-function statusBadge(status) {
-  const s = String(status || "").toLowerCase();
-  if (s === "ok") return "bg-emerald-100 text-emerald-800";
-  if (s === "mismatch") return "bg-amber-100 text-amber-800";
-  if (s === "error") return "bg-red-100 text-red-800";
-  return "bg-gray-100 text-gray-700";
+function londonTodayYMD() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return `${y}-${m}-${d}`;
+}
+function isValidYMD(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+function ymdToDateNoonUTC(ymd) {
+  const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
+  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+}
+function dateToYMDUTC(date) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+function addDaysYMD(ymd, days) {
+  const dt = ymdToDateNoonUTC(ymd);
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dateToYMDUTC(dt);
+}
+function weekdayOfYMD(ymd) {
+  const d = ymdToDateNoonUTC(ymd).getUTCDay();
+  const map = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  return map[d];
+}
+function nextOccurrenceOfWeekday(fromYMD, desiredDayName) {
+  const start = ymdToDateNoonUTC(fromYMD);
+  const desiredIndex = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(
+    desiredDayName
+  );
+  if (desiredIndex === -1) return fromYMD;
+  const startIndex = start.getUTCDay();
+  const delta = (desiredIndex - startIndex + 7) % 7;
+  const out = new Date(start);
+  out.setUTCDate(out.getUTCDate() + delta);
+  return dateToYMDUTC(out);
+}
+function computeNextFromAnchor({ anchorYMD, frequencyDays, todayYMD }) {
+  let next = anchorYMD;
+  for (let i = 0; i < 2000; i++) {
+    if (next >= todayYMD) return next;
+    next = addDaysYMD(next, frequencyDays);
+  }
+  return null;
 }
 
-export default function OpsSubscribers({ initial, _error }) {
-  const [rows, setRows] = useState(initial || []);
+function prettySlot(s) {
+  const v = (s || "").toString().toUpperCase();
+  if (!v) return "(blank)";
+  return v;
+}
+
+export default function OpsSubscribersPage() {
+  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState("");
+
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(_error || "");
-
-  const [open, setOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [edit, setEdit] = useState(null);
-
-  const [billingRunning, setBillingRunning] = useState(false);
-  const [billingResult, setBillingResult] = useState(null);
-
   const filtered = useMemo(() => {
-    const qq = q.trim().toLowerCase();
-    return (rows || []).filter((r) => {
-      if (status && String(r.status || "").toLowerCase() !== status) return false;
-      if (!qq) return true;
+    const needle = q.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter((r) => {
       const hay = [
-        r.email,
         r.name,
+        r.email,
         r.phone,
         r.postcode,
         r.address,
@@ -56,444 +103,739 @@ export default function OpsSubscribers({ initial, _error }) {
         r.route_day,
         r.route_slot,
         r.frequency,
+        r.status,
       ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      return hay.includes(qq);
+      return hay.includes(needle);
     });
-  }, [rows, q, status]);
+  }, [rows, q]);
 
-  async function refresh() {
-    setError("");
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (q.trim()) params.set("q", q.trim());
-      if (status) params.set("status", status);
-      params.set("limit", "300");
+  const [editing, setEditing] = useState(null); // subscription row
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [saveWarnings, setSaveWarnings] = useState([]);
 
-      const res = await fetch(`/api/ops/subscriptions?${params.toString()}`);
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || `Failed to load (${res.status})`);
-      setRows(json.data || []);
-    } catch (e) {
-      setError(e?.message || "Failed to load");
-    } finally {
-      setLoading(false);
+  // Edit form state
+  const [form, setForm] = useState({
+    route_day: "",
+    route_area: "",
+    route_slot: "",
+    frequency: "weekly",
+  });
+
+  // Explicit scheduling controls
+  const [schedulingMode, setSchedulingMode] = useState("AUTO_FROM_ANCHOR"); // AUTO_FROM_ANCHOR | MANUAL_NEXT
+  const [manualNext, setManualNext] = useState("");
+  const [setAnchorToNext, setSetAnchorToNext] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setErr("");
+      setLoading(true);
+      try {
+        if (!supabaseClient) throw new Error("supabaseClient is not configured");
+
+        const { data, error } = await supabaseClient
+          .from("subscriptions")
+          .select(
+            "id, status, name, email, phone, address, postcode, route_day, route_area, route_slot, frequency, next_collection_date, anchor_date, use_own_bin, extra_bags"
+          )
+          .order("postcode", { ascending: true })
+          .order("address", { ascending: true })
+          .limit(2000);
+
+        if (error) throw error;
+        if (!cancelled) setRows(data || []);
+      } catch (e) {
+        if (!cancelled) setErr(e?.message || "Failed to load subscribers");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
-  }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function openEdit(r) {
-    setError("");
-    setBillingResult(null);
-    setEdit({
-      id: r.id,
-      email: r.email || "",
-      name: r.name || "",
-      phone: r.phone || "",
-      postcode: r.postcode || "",
-      address: r.address || "",
-      status: r.status || "pending",
-      frequency: r.frequency || "weekly",
-      extra_bags: Number(r.extra_bags || 0),
-      use_own_bin: !!r.use_own_bin,
-      route_area: r.route_area || "",
+    setSaveMsg("");
+    setSaveWarnings([]);
+    setEditing(r);
+
+    setForm({
       route_day: r.route_day || "",
-      route_slot: r.route_slot || "",
-      next_collection_date: formatYMD(r.next_collection_date),
-      anchor_date: formatYMD(r.anchor_date),
-      pause_until: formatYMD(r.pause_until),
-      paused_reason: r.paused_reason || "",
-      billing_alignment_status: r.billing_alignment_status || "unknown",
-      billing_alignment_notes: r.billing_alignment_notes || "",
-      billing_alignment_checked_at: r.billing_alignment_checked_at || null,
+      route_area: r.route_area || "",
+      route_slot: (r.route_slot || "").toString().toUpperCase(),
+      frequency: r.frequency || "weekly",
     });
-    setOpen(true);
+
+    // Default scheduling mode rules:
+    // - If route_day changes, we’ll encourage MANUAL_NEXT, but we don’t force it.
+    setSchedulingMode("AUTO_FROM_ANCHOR");
+    setManualNext("");
+    setSetAnchorToNext(false);
   }
 
-  async function saveEdit() {
-    if (!edit?.id) return;
-    setSaving(true);
-    setError("");
+  function closeEdit() {
+    setEditing(null);
+    setSaveBusy(false);
+    setSaveMsg("");
+    setSaveWarnings([]);
+  }
+
+  const preview = useMemo(() => {
+    if (!editing) return null;
+
+    const today = londonTodayYMD();
+    const freqDays = FREQUENCY_TO_DAYS[form.frequency] || 7;
+
+    const current = {
+      route_day: editing.route_day || "",
+      route_area: editing.route_area || "",
+      route_slot: (editing.route_slot || "").toString().toUpperCase(),
+      frequency: editing.frequency || "",
+      next_collection_date: editing.next_collection_date || "",
+      anchor_date: editing.anchor_date || "",
+    };
+
+    const next = {
+      route_day: form.route_day || "",
+      route_area: form.route_area || "",
+      route_slot: (form.route_slot || "").toString().toUpperCase(),
+      frequency: form.frequency || "",
+    };
+
+    const warnings = [];
+
+    const routeDayChanged = (current.route_day || "") !== (next.route_day || "");
+    const freqChanged = (current.frequency || "") !== (next.frequency || "");
+
+    // Compute what would happen if AUTO_FROM_ANCHOR:
+    let autoAnchor = isValidYMD(current.anchor_date) ? current.anchor_date : null;
+    if (!autoAnchor) {
+      autoAnchor = isValidYMD(current.next_collection_date) ? current.next_collection_date : today;
+      warnings.push("anchor_date is missing; AUTO preview uses fallback (next_collection_date or today).");
+    }
+
+    const autoNext = computeNextFromAnchor({ anchorYMD: autoAnchor, frequencyDays: freqDays, todayYMD: today });
+
+    if (!autoNext) warnings.push("Could not compute AUTO next_collection_date (unexpected).");
+
+    // Manual suggestion if route_day changed
+    let suggestedManualNext = "";
+    if (next.route_day) {
+      suggestedManualNext = nextOccurrenceOfWeekday(today, next.route_day);
+    }
+
+    // Alignment warnings (for AUTO preview)
+    if (autoNext && next.route_day) {
+      const wd = weekdayOfYMD(autoNext);
+      if (wd !== next.route_day) {
+        warnings.push(
+          `AUTO next_collection_date would be ${autoNext} (${wd}) which does not match route_day (${next.route_day}).`
+        );
+      }
+    }
+    if (autoAnchor && next.route_day) {
+      const awd = weekdayOfYMD(autoAnchor);
+      if (awd !== next.route_day) {
+        warnings.push(
+          `anchor_date basis is ${autoAnchor} (${awd}) which does not match route_day (${next.route_day}).`
+        );
+      }
+    }
+
+    // Encourage explicit manual control if route_day changes
+    if (routeDayChanged) {
+      warnings.push(
+        "You changed route_day. Consider switching to MANUAL next date so you can set a clean next_collection_date (and optionally re-anchor)."
+      );
+    }
+    if (freqChanged && !routeDayChanged) {
+      // good case
+      // no extra warning needed
+    }
+
+    return {
+      today,
+      current,
+      next,
+      routeDayChanged,
+      freqChanged,
+      autoAnchor,
+      autoNext,
+      suggestedManualNext,
+      warnings,
+    };
+  }, [editing, form]);
+
+  async function save() {
+    if (!editing) return;
+    setSaveBusy(true);
+    setSaveMsg("");
+    setSaveWarnings([]);
+
     try {
-      const res = await fetch(`/api/ops/subscriptions/${encodeURIComponent(edit.id)}`, {
-        method: "PUT",
+      // Front-end safety checks (server also enforces)
+      if (form.frequency && !FREQUENCY_TO_DAYS[form.frequency]) {
+        throw new Error("Invalid frequency selected");
+      }
+      if (form.route_day && !ROUTE_DAYS.includes(form.route_day)) {
+        throw new Error("Invalid route day");
+      }
+      if (form.route_slot && !["", "ANY", "AM", "PM"].includes(form.route_slot)) {
+        throw new Error("Invalid slot");
+      }
+
+      if (schedulingMode === "MANUAL_NEXT") {
+        if (!isValidYMD(manualNext)) {
+          throw new Error("Manual next date is required (YYYY-MM-DD)");
+        }
+      }
+
+      const resp = await fetch("/api/ops/subscriptions/update", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          status: edit.status,
-          frequency: edit.frequency,
-          extra_bags: Number(edit.extra_bags || 0),
-
-          name: edit.name,
-          phone: edit.phone,
-          postcode: edit.postcode,
-          address: edit.address,
-
-          route_area: edit.route_area,
-          route_day: edit.route_day,
-          route_slot: edit.route_slot,
-
-          next_collection_date: edit.next_collection_date || null,
-          anchor_date: edit.anchor_date || null,
-
-          pause_until: edit.pause_until || null,
-          paused_reason: edit.paused_reason || null,
+          subscription_id: editing.id,
+          route_day: form.route_day || null,
+          route_area: (form.route_area || "").trim() || null,
+          route_slot: form.route_slot || "",
+          frequency: form.frequency,
+          scheduling_mode: schedulingMode,
+          manual_next_collection_date: schedulingMode === "MANUAL_NEXT" ? manualNext : null,
+          set_anchor_to_next: schedulingMode === "MANUAL_NEXT" ? !!setAnchorToNext : false,
         }),
       });
 
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Save failed");
+      const json = await resp.json();
+      if (!resp.ok) {
+        throw new Error(json?.error || "Update failed");
+      }
 
-      const updated = json.data;
-      setRows((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)));
-      setOpen(false);
-      setEdit(null);
-    } catch (e) {
-      setError(e?.message || "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function billingSync(action) {
-    if (!edit?.id) return;
-    setBillingRunning(true);
-    setError("");
-    setBillingResult(null);
-    try {
-      const res = await fetch(
-        `/api/ops/subscriptions/${encodeURIComponent(edit.id)}/billing-sync`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action }),
-        }
+      // Update local list
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === editing.id
+            ? {
+                ...r,
+                route_day: json.after.route_day,
+                route_area: json.after.route_area,
+                route_slot: json.after.route_slot,
+                frequency: json.after.frequency,
+                next_collection_date: json.after.next_collection_date,
+                anchor_date: json.after.anchor_date,
+              }
+            : r
+        )
       );
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Billing sync failed");
 
-      setBillingResult(json);
-      await refresh();
+      setSaveWarnings(json.warnings || []);
+      setSaveMsg("Saved.");
+      // keep modal open so ops can read warnings, but refresh editing row:
+      setEditing((cur) =>
+        cur
+          ? {
+              ...cur,
+              route_day: json.after.route_day,
+              route_area: json.after.route_area,
+              route_slot: json.after.route_slot,
+              frequency: json.after.frequency,
+              next_collection_date: json.after.next_collection_date,
+              anchor_date: json.after.anchor_date,
+            }
+          : cur
+      );
     } catch (e) {
-      setError(e?.message || "Billing sync failed");
+      setSaveMsg(e?.message || "Save failed");
     } finally {
-      setBillingRunning(false);
+      setSaveBusy(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-7xl px-4 py-6">
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900">Subscribers</h1>
-            <p className="text-sm text-gray-600">
-              Edit customers + keep Supabase billing aligned with Stripe.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <Link
-              href="/ops/dashboard"
-              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
-            >
-              Back to dashboard
-            </Link>
-            <button
-              type="button"
-              onClick={refresh}
-              disabled={loading}
-              className={classNames(
-                "rounded-lg px-3 py-2 text-sm font-semibold",
-                loading ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
-              )}
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
+    <div style={{ padding: 20, maxWidth: 1200, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <h1 style={{ margin: 0 }}>Subscribers</h1>
+          <div style={{ opacity: 0.75, marginTop: 6 }}>
+            Safe edits with explicit scheduling preview (no silent magic).
           </div>
         </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Link href="/ops/dashboard">← Ops Dashboard</Link>
+        </div>
+      </div>
 
-        {error ? (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-            <div className="font-semibold">Subscribers list error</div>
-            <div className="mt-1">{error}</div>
-            <div className="mt-2 text-xs text-red-700">
-              Most common fix: your Vercel env vars for Supabase admin are missing or incorrect
-              (service role key), so the ops API can’t read the table.
-            </div>
-          </div>
-        ) : null}
+      <div style={{ marginTop: 14, display: "flex", gap: 12, alignItems: "center" }}>
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search name, postcode, address, route area, etc..."
+          style={{
+            flex: 1,
+            padding: "10px 12px",
+            border: "1px solid #ddd",
+            borderRadius: 10,
+          }}
+        />
+        <button
+          onClick={() => {
+            setQ("");
+          }}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #ddd",
+            background: "white",
+            cursor: "pointer",
+          }}
+        >
+          Clear
+        </button>
+      </div>
 
-        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Search email, postcode, area, name…"
-                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 sm:max-w-md"
-              />
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 sm:max-w-xs"
-              >
-                {STATUSES.map((s) => (
-                  <option key={s} value={s}>
-                    {s ? `Status: ${s}` : "All statuses"}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="text-xs text-gray-500">{filtered.length} shown</div>
-          </div>
+      {err ? (
+        <div style={{ marginTop: 14, padding: 12, border: "1px solid #f99", borderRadius: 10, background: "#fff5f5" }}>
+          {err}
+        </div>
+      ) : null}
 
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-[1300px] w-full text-sm">
-              <thead className="bg-gray-50 text-xs text-gray-600">
-                <tr>
-                  <th className="px-3 py-2 text-left">Status</th>
-                  <th className="px-3 py-2 text-left">Billing</th>
-                  <th className="px-3 py-2 text-left">Email</th>
-                  <th className="px-3 py-2 text-left">Postcode</th>
-                  <th className="px-3 py-2 text-left">Frequency</th>
-                  <th className="px-3 py-2 text-left">Bags</th>
-                  <th className="px-3 py-2 text-left">Route</th>
-                  <th className="px-3 py-2 text-left">Next</th>
-                  <th className="px-3 py-2 text-right">Actions</th>
+      {loading ? (
+        <div style={{ marginTop: 18, opacity: 0.75 }}>Loading…</div>
+      ) : (
+        <div style={{ marginTop: 18, border: "1px solid #eee", borderRadius: 12, overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#fafafa" }}>
+                  {["Name", "Postcode", "Address", "Status", "Freq", "Route", "Slot", "Next", "Actions"].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        textAlign: "left",
+                        padding: "10px 12px",
+                        borderBottom: "1px solid #eee",
+                        fontWeight: 600,
+                        fontSize: 13,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
-                {filtered.length ? (
-                  filtered.map((r) => (
-                    <tr key={r.id} className="bg-white">
-                      <td className="px-3 py-2">
-                        <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
-                          {r.status || "—"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={classNames(
-                            "rounded-md px-2 py-1 text-xs font-semibold",
-                            statusBadge(r.billing_alignment_status)
-                          )}
-                          title={r.billing_alignment_notes || ""}
-                        >
-                          {r.billing_alignment_status || "unknown"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-gray-900">{r.email || "—"}</td>
-                      <td className="px-3 py-2 text-gray-900">{r.postcode || "—"}</td>
-                      <td className="px-3 py-2 text-gray-900">{r.frequency || "—"}</td>
-                      <td className="px-3 py-2 text-gray-900">{Number(r.extra_bags || 0)}</td>
-                      <td className="px-3 py-2 text-gray-900">
-                        {r.route_area ? (
-                          <>
-                            {r.route_area} • {r.route_day || "—"}
-                            {r.route_slot ? ` • ${r.route_slot}` : ""}
-                          </>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-gray-900">
-                        {r.next_collection_date ? formatYMD(r.next_collection_date) : "—"}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <button
-                          type="button"
-                          onClick={() => openEdit(r)}
-                          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50"
-                        >
-                          Edit
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={9}>
-                      {error
-                        ? "No data loaded due to API error above."
-                        : "No subscribers found (or none match your filters)."}
+              <tbody>
+                {filtered.map((r) => (
+                  <tr key={r.id}>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      <div style={{ fontWeight: 600 }}>{r.name || "(no name)"}</div>
+                      <div style={{ opacity: 0.75, fontSize: 12 }}>{r.email || ""}</div>
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {r.postcode || ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", minWidth: 280 }}>
+                      {r.address || ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {r.status || ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {r.frequency || ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {r.route_day || ""} {r.route_area ? `• ${r.route_area}` : ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {prettySlot(r.route_slot)}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      {r.next_collection_date || ""}
+                    </td>
+                    <td style={{ padding: "10px 12px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>
+                      <button
+                        onClick={() => openEdit(r)}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: "1px solid #ddd",
+                          background: "white",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Edit
+                      </button>
                     </td>
                   </tr>
-                )}
+                ))}
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} style={{ padding: 16, opacity: 0.75 }}>
+                      No matches.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
         </div>
+      )}
 
-        {/* Modal (unchanged from previous version, kept minimal here) */}
-        {open && edit ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-            <div className="w-full max-w-4xl rounded-2xl bg-white shadow-xl">
-              <div className="border-b border-gray-200 p-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900">Edit subscriber</div>
-                    <div className="mt-1 text-xs text-gray-600">
-                      {edit.email} • {edit.postcode}
+      {/* Edit modal */}
+      {editing ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 18,
+            zIndex: 50,
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeEdit();
+          }}
+        >
+          <div
+            style={{
+              width: "min(980px, 100%)",
+              background: "white",
+              borderRadius: 16,
+              boxShadow: "0 10px 40px rgba(0,0,0,0.2)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 16, borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16 }}>{editing.name || "(no name)"}</div>
+                <div style={{ opacity: 0.75, fontSize: 12 }}>
+                  {editing.postcode || ""} • {editing.address || ""}
+                </div>
+              </div>
+              <button
+                onClick={closeEdit}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: "white",
+                  cursor: "pointer",
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              {/* Left: Edit fields */}
+              <div style={{ border: "1px solid #eee", borderRadius: 14, padding: 14 }}>
+                <div style={{ fontWeight: 700, marginBottom: 10 }}>Edit route & frequency</div>
+
+                <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Route day</label>
+                <select
+                  value={form.route_day}
+                  onChange={(e) => setForm((p) => ({ ...p, route_day: e.target.value }))}
+                  style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginBottom: 12 }}
+                >
+                  <option value="">(blank)</option>
+                  {ROUTE_DAYS.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+
+                <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Route area</label>
+                <input
+                  value={form.route_area}
+                  onChange={(e) => setForm((p) => ({ ...p, route_area: e.target.value }))}
+                  placeholder="e.g. Pyle East"
+                  style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginBottom: 12 }}
+                />
+
+                <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Slot</label>
+                <select
+                  value={form.route_slot}
+                  onChange={(e) => setForm((p) => ({ ...p, route_slot: e.target.value }))}
+                  style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginBottom: 12 }}
+                >
+                  {ROUTE_SLOTS.map((s) => (
+                    <option key={s.value || "blank"} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+
+                <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Frequency</label>
+                <select
+                  value={form.frequency}
+                  onChange={(e) => setForm((p) => ({ ...p, frequency: e.target.value }))}
+                  style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+                >
+                  <option value="weekly">weekly</option>
+                  <option value="fortnightly">fortnightly</option>
+                  <option value="three-weekly">three-weekly</option>
+                </select>
+
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #eee" }}>
+                  <div style={{ fontWeight: 700, marginBottom: 10 }}>Scheduling mode</div>
+
+                  <label style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
+                    <input
+                      type="radio"
+                      checked={schedulingMode === "AUTO_FROM_ANCHOR"}
+                      onChange={() => setSchedulingMode("AUTO_FROM_ANCHOR")}
+                    />
+                    <div>
+                      <div style={{ fontWeight: 600 }}>AUTO (from anchor)</div>
+                      <div style={{ fontSize: 12, opacity: 0.75 }}>
+                        Recalculate next_collection_date from anchor_date + frequency (explicit preview on right).
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpen(false);
-                      setEdit(null);
-                    }}
-                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50"
-                  >
-                    Close
-                  </button>
+                  </label>
+
+                  <label style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                    <input
+                      type="radio"
+                      checked={schedulingMode === "MANUAL_NEXT"}
+                      onChange={() => {
+                        setSchedulingMode("MANUAL_NEXT");
+                        // Suggest a sane default when switching:
+                        const today = londonTodayYMD();
+                        const suggested = form.route_day ? nextOccurrenceOfWeekday(today, form.route_day) : today;
+                        setManualNext((cur) => (cur && isValidYMD(cur) ? cur : suggested));
+                      }}
+                      style={{ marginTop: 4 }}
+                    />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600 }}>MANUAL next date</div>
+                      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>
+                        Use when route_day changes or you want a clean reset.
+                      </div>
+
+                      <input
+                        type="date"
+                        value={manualNext}
+                        onChange={(e) => setManualNext(e.target.value)}
+                        disabled={schedulingMode !== "MANUAL_NEXT"}
+                        style={{
+                          width: "100%",
+                          padding: 10,
+                          borderRadius: 10,
+                          border: "1px solid #ddd",
+                          background: schedulingMode === "MANUAL_NEXT" ? "white" : "#fafafa",
+                        }}
+                      />
+
+                      <label style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+                        <input
+                          type="checkbox"
+                          checked={setAnchorToNext}
+                          onChange={(e) => setSetAnchorToNext(e.target.checked)}
+                          disabled={schedulingMode !== "MANUAL_NEXT"}
+                        />
+                        <span style={{ fontSize: 13 }}>
+                          Also set <b>anchor_date</b> to this next date (explicit re-anchor)
+                        </span>
+                      </label>
+                    </div>
+                  </label>
                 </div>
               </div>
 
-              <div className="p-4">
-                <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-sm font-semibold text-gray-900">
-                      Billing alignment:{" "}
-                      <span
-                        className={classNames(
-                          "ml-1 rounded-md px-2 py-1 text-xs font-semibold",
-                          statusBadge(edit.billing_alignment_status)
-                        )}
-                      >
-                        {edit.billing_alignment_status || "unknown"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => billingSync("check")}
-                        disabled={billingRunning}
-                        className={classNames(
-                          "rounded-lg px-3 py-1.5 text-xs font-semibold",
-                          billingRunning
-                            ? "bg-gray-300 text-gray-600"
-                            : "bg-gray-900 text-white hover:bg-black"
-                        )}
-                      >
-                        {billingRunning ? "Working…" : "Check Stripe"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => billingSync("apply")}
-                        disabled={billingRunning}
-                        className={classNames(
-                          "rounded-lg px-3 py-1.5 text-xs font-semibold",
-                          billingRunning
-                            ? "bg-gray-300 text-gray-600"
-                            : "bg-emerald-600 text-white hover:bg-emerald-700"
-                        )}
-                      >
-                        {billingRunning ? "Working…" : "Apply to Stripe"}
-                      </button>
-                    </div>
-                  </div>
+              {/* Right: Preview + warnings */}
+              <div style={{ border: "1px solid #eee", borderRadius: 14, padding: 14 }}>
+                <div style={{ fontWeight: 700, marginBottom: 10 }}>Preview (before you save)</div>
 
-                  {billingResult ? (
-                    <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-800">
-                      <div className="font-semibold">
-                        Result: {billingResult.aligned ? "✅ aligned" : "⚠️ mismatch"}
+                {preview ? (
+                  <>
+                    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10 }}>
+                      Today (London): <b>{preview.today}</b>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                      <div style={{ padding: 12, borderRadius: 12, border: "1px solid #eee", background: "#fafafa" }}>
+                        <div style={{ fontWeight: 700, marginBottom: 8 }}>Current</div>
+                        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                          <div>
+                            Route: <b>{preview.current.route_day || "(blank)"}</b> •{" "}
+                            <b>{preview.current.route_area || "(blank)"}</b>
+                          </div>
+                          <div>
+                            Slot: <b>{prettySlot(preview.current.route_slot)}</b>
+                          </div>
+                          <div>
+                            Frequency: <b>{preview.current.frequency || "(blank)"}</b>
+                          </div>
+                          <div>
+                            Anchor: <b>{preview.current.anchor_date || "(null)"}</b>
+                          </div>
+                          <div>
+                            Next: <b>{preview.current.next_collection_date || "(null)"}</b>
+                          </div>
+                        </div>
                       </div>
-                      {billingResult.notes?.length ? (
-                        <ul className="mt-2 list-disc pl-5">
-                          {billingResult.notes.map((n, i) => (
-                            <li key={i}>{n}</li>
+
+                      <div style={{ padding: 12, borderRadius: 12, border: "1px solid #eee" }}>
+                        <div style={{ fontWeight: 700, marginBottom: 8 }}>After save</div>
+                        <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                          <div>
+                            Route: <b>{preview.next.route_day || "(blank)"}</b> • <b>{preview.next.route_area || "(blank)"}</b>
+                          </div>
+                          <div>
+                            Slot: <b>{prettySlot(preview.next.route_slot)}</b>
+                          </div>
+                          <div>
+                            Frequency: <b>{preview.next.frequency || "(blank)"}</b>
+                          </div>
+
+                          {schedulingMode === "AUTO_FROM_ANCHOR" ? (
+                            <>
+                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #eee" }}>
+                                <div style={{ fontSize: 12, opacity: 0.75 }}>AUTO result</div>
+                                <div>
+                                  Anchor used: <b>{preview.autoAnchor}</b>
+                                </div>
+                                <div>
+                                  Next becomes: <b>{preview.autoNext || "(failed)"}</b>{" "}
+                                  {preview.autoNext ? (
+                                    <span style={{ opacity: 0.75 }}>({weekdayOfYMD(preview.autoNext)})</span>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #eee" }}>
+                                <div style={{ fontSize: 12, opacity: 0.75 }}>MANUAL result</div>
+                                <div>
+                                  Next becomes: <b>{manualNext || "(required)"}</b>{" "}
+                                  {manualNext && isValidYMD(manualNext) ? (
+                                    <span style={{ opacity: 0.75 }}>({weekdayOfYMD(manualNext)})</span>
+                                  ) : null}
+                                </div>
+                                <div>
+                                  Anchor update:{" "}
+                                  <b>{setAnchorToNext ? "YES (anchor_date = next)" : "NO (leave anchor_date)"}</b>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Warnings */}
+                    {(preview.warnings?.length || 0) > 0 ? (
+                      <div
+                        style={{
+                          marginTop: 12,
+                          padding: 12,
+                          borderRadius: 12,
+                          border: "1px solid #fde68a",
+                          background: "#fffbeb",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, marginBottom: 6 }}>Warnings</div>
+                        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.5 }}>
+                          {preview.warnings.map((w, i) => (
+                            <li key={i}>{w}</li>
                           ))}
                         </ul>
-                      ) : null}
+                        {preview.routeDayChanged && preview.suggestedManualNext ? (
+                          <div style={{ marginTop: 10, fontSize: 13 }}>
+                            Suggested MANUAL next date for {preview.next.route_day}: <b>{preview.suggestedManualNext}</b>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {/* Save response warnings */}
+                    {(saveWarnings?.length || 0) > 0 ? (
+                      <div
+                        style={{
+                          marginTop: 12,
+                          padding: 12,
+                          borderRadius: 12,
+                          border: "1px solid #fde68a",
+                          background: "#fffbeb",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, marginBottom: 6 }}>Server warnings (saved)</div>
+                        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.5 }}>
+                          {saveWarnings.map((w, i) => (
+                            <li key={i}>{w}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+
+                    {saveMsg ? (
+                      <div
+                        style={{
+                          marginTop: 12,
+                          padding: 12,
+                          borderRadius: 12,
+                          border: "1px solid #eee",
+                          background: "#fafafa",
+                          fontSize: 13,
+                        }}
+                      >
+                        {saveMsg}
+                      </div>
+                    ) : null}
+
+                    <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                      <button
+                        onClick={closeEdit}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 10,
+                          border: "1px solid #ddd",
+                          background: "white",
+                          cursor: "pointer",
+                        }}
+                        disabled={saveBusy}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={save}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 10,
+                          border: "1px solid #111",
+                          background: "#111",
+                          color: "white",
+                          cursor: "pointer",
+                          opacity: saveBusy ? 0.7 : 1,
+                        }}
+                        disabled={saveBusy}
+                      >
+                        {saveBusy ? "Saving…" : "Save changes"}
+                      </button>
                     </div>
-                  ) : null}
-                </div>
-
-                {/* minimal edit fields relevant to your question */}
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700">Frequency</label>
-                    <select
-                      value={edit.frequency}
-                      onChange={(e) => setEdit({ ...edit, frequency: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
-                    >
-                      {FREQUENCIES.map((f) => (
-                        <option key={f.value} value={f.value}>
-                          {f.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={10}
-                      value={edit.extra_bags}
-                      onChange={(e) => setEdit({ ...edit, extra_bags: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-5 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpen(false);
-                      setEdit(null);
-                    }}
-                    disabled={saving}
-                    className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={saveEdit}
-                    disabled={saving}
-                    className={classNames(
-                      "rounded-lg px-4 py-2 text-sm font-semibold",
-                      saving ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
-                    )}
-                  >
-                    {saving ? "Saving…" : "Save changes"}
-                  </button>
-                </div>
-
-                <div className="mt-3 text-xs text-gray-500">
-                  Workflow: change frequency/bags → Save → Check Stripe → Apply to Stripe if mismatch.
-                </div>
+                  </>
+                ) : (
+                  <div style={{ opacity: 0.75 }}>No preview.</div>
+                )}
               </div>
             </div>
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
-}
-
-export async function getServerSideProps(ctx) {
-  const proto = (ctx.req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
-  const host = ctx.req.headers["x-forwarded-host"] || ctx.req.headers.host;
-  const baseUrl = `${proto}://${host}`;
-
-  try {
-    const res = await fetch(`${baseUrl}/api/ops/subscriptions?limit=200`, {
-      headers: {
-        authorization: ctx.req.headers.authorization || "",
-        cookie: ctx.req.headers.cookie || "",
-      },
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) return { props: { initial: [], _error: json?.error || "Failed to load" } };
-    return { props: { initial: json.data || [], _error: "" } };
-  } catch (e) {
-    return { props: { initial: [], _error: e?.message || "Failed to load" } };
-  }
 }
