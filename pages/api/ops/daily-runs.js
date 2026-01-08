@@ -24,7 +24,7 @@ export default async function handler(req, res) {
           id, run_date, route_day, route_area, route_slot, vehicle_id, notes, created_at,
           vehicles:vehicles(id, registration, name),
           daily_run_staff:daily_run_staff(
-            id,
+            staff_id,
             staff:staff(id, name, role, active)
           )
         `
