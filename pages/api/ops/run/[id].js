@@ -19,7 +19,6 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: "Missing id" });
 
   try {
-    // Load run
     const { data: run, error: eRun } = await supabase
       .from("daily_runs")
       .select(
@@ -27,7 +26,7 @@ export default async function handler(req, res) {
         id, run_date, route_day, route_area, route_slot, vehicle_id, notes,
         vehicles:vehicles(id, registration, name),
         daily_run_staff:daily_run_staff(
-          id,
+          staff_id,
           staff:staff(id, name, role, active)
         )
       `
@@ -40,7 +39,6 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
-    // Stops = subscriptions due on run_date and matching area/day (and slot rules)
     let q = supabase
       .from("subscriptions")
       .select(
@@ -51,20 +49,15 @@ export default async function handler(req, res) {
       .eq("route_day", run.route_day)
       .eq("route_area", run.route_area);
 
-    // Slot matching:
-    // - ANY run => no extra filter
-    // - AM/PM run => include route_slot = runSlot OR ANY OR null OR empty
     if (runSlot !== "ANY") {
       q = q.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
     }
 
     const { data: subs, error: eSubs } = await q.order("postcode", { ascending: true });
-
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
     const subscriptionIds = (subs || []).map((s) => s.id);
 
-    // Get collected states for this run date
     let collectedMap = new Map();
     if (subscriptionIds.length) {
       const { data: cols, error: eCols } = await supabase
@@ -87,7 +80,6 @@ export default async function handler(req, res) {
       totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
     };
 
-    // Helpful warning if lots of blanks on slot when run is AM/PM
     let warning = "";
     if (runSlot !== "ANY") {
       const blanks = stops.filter((s) => !s.route_slot || String(s.route_slot).trim() === "").length;
