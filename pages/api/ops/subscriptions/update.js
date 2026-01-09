@@ -1,5 +1,5 @@
 // pages/api/ops/subscriptions/update.js
-import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 const FREQUENCY_TO_DAYS = {
   weekly: 7,
@@ -44,30 +44,13 @@ function addDaysYMD(ymd, days) {
   return dateToYMDUTC(dt);
 }
 function weekdayOfYMD(ymd) {
-  // JS: 0=Sun..6=Sat
   const d = ymdToDateNoonUTC(ymd).getUTCDay();
   const map = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   return map[d];
 }
-function nextOccurrenceOfWeekday(fromYMD, desiredDayName) {
-  const start = ymdToDateNoonUTC(fromYMD);
-  const desiredIndex = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(
-    desiredDayName
-  );
-  if (desiredIndex === -1) return fromYMD;
-
-  const startIndex = start.getUTCDay();
-  let delta = (desiredIndex - startIndex + 7) % 7;
-  // If "fromYMD" is already that weekday, delta = 0 => same day is acceptable.
-  const out = new Date(start);
-  out.setUTCDate(out.getUTCDate() + delta);
-  return dateToYMDUTC(out);
-}
 
 function computeNextFromAnchor({ anchorYMD, frequencyDays, todayYMD }) {
-  // next = first date >= today that is anchor + k*freqDays
   let next = anchorYMD;
-  // guard against infinite loop
   for (let i = 0; i < 2000; i++) {
     if (next >= todayYMD) return next;
     next = addDaysYMD(next, frequencyDays);
@@ -161,7 +144,6 @@ export default async function handler(req, res) {
       }
       nextYMD = manual_next_collection_date;
 
-      // If ops wants to re-anchor, do it explicitly
       if (set_anchor_to_next) {
         anchorYMD = nextYMD;
       } else if (!anchorYMD) {
@@ -169,7 +151,6 @@ export default async function handler(req, res) {
       }
     } else {
       // AUTO_FROM_ANCHOR
-      // If anchor missing, fall back explicitly & warn.
       if (!anchorYMD) {
         const fallback =
           (existing.next_collection_date && isValidYMD(existing.next_collection_date) && existing.next_collection_date) ||
@@ -210,8 +191,6 @@ export default async function handler(req, res) {
       next_collection_date: nextYMD,
     };
 
-    // Only set anchor_date if we have one and we’re intentionally writing it (MANUAL_NEXT + set_anchor_to_next OR anchor fallback).
-    // For AUTO_FROM_ANCHOR we keep anchor as existing unless we had to fallback due to missing anchor_date.
     const existingAnchorValid = existing.anchor_date && isValidYMD(existing.anchor_date);
     const wroteFallbackAnchor = scheduling_mode === "AUTO_FROM_ANCHOR" && !existingAnchorValid && anchorYMD;
 
