@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 
