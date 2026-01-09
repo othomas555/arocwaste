@@ -58,6 +58,94 @@ function sortMatches(matches) {
   return arr;
 }
 
+// ---- Date helpers (London-safe) ----
+const DAY_INDEX = {
+  Sunday: 0,
+  Monday: 1,
+  Tuesday: 2,
+  Wednesday: 3,
+  Thursday: 4,
+  Friday: 5,
+  Saturday: 6,
+};
+
+function londonTodayYMD() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return `${y}-${m}-${d}`;
+}
+
+function ymdToDateNoonUTC(ymd) {
+  const [Y, M, D] = String(ymd).split("-").map((x) => Number(x));
+  return new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
+}
+function dateToYMDUTC(dt) {
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+function addDaysYMD(ymd, n) {
+  const dt = ymdToDateNoonUTC(ymd);
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dateToYMDUTC(dt);
+}
+
+function londonWeekdayNameToday() {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+  }).format(new Date());
+}
+
+function nextOccurrencesOfDay(routeDay, count = 6) {
+  const todayYMD = londonTodayYMD();
+  const todayWeekday = londonWeekdayNameToday();
+
+  const todayIdx = DAY_INDEX[todayWeekday];
+  const targetIdx = DAY_INDEX[routeDay];
+  if (todayIdx == null || targetIdx == null) return [];
+
+  const delta = (targetIdx - todayIdx + 7) % 7; // includes today if same day
+  const first = addDaysYMD(todayYMD, delta);
+
+  const out = [];
+  for (let i = 0; i < count; i++) out.push(addDaysYMD(first, i * 7));
+  return out;
+}
+
+function formatStartOption(ymd) {
+  const dt = ymdToDateNoonUTC(ymd);
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(dt);
+}
+
+// ---- Stripe-aligned pricing (matches your Stripe products) ----
+const STRIPE_PRICES = {
+  bin: 16.8,
+  bag: 3.2,
+  deposit: 50.0,
+};
+
+function frequencyLabel(freq) {
+  if (freq === "weekly") return "per week";
+  if (freq === "fortnightly") return "every 2 weeks";
+  return "every 3 weeks";
+}
+
 export default function BinsBags() {
   // --- Postcode / coverage ---
   const [postcode, setPostcode] = useState("");
@@ -76,28 +164,12 @@ export default function BinsBags() {
   const [extraBags, setExtraBags] = useState(0);
   const [useOwnBin, setUseOwnBin] = useState(false);
 
+  // --- First collection start date ---
+  const [startDate, setStartDate] = useState(""); // YYYY-MM-DD (chosen)
+
   // --- UI state ---
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
-
-  // Prices are displayed as guidance only — Stripe is the source of truth at checkout.
-  // Keep these aligned with your Stripe prices if you want the UI to match exactly.
-  const priceGuide = useMemo(() => {
-    // You can tweak these numbers if you want — they are only for display.
-    // If you want exact pricing displayed, we can add a lightweight pricing API later.
-    const base = {
-      weekly: 8.0,
-      fortnightly: 9.0,
-      threeweekly: 10.0,
-    };
-    const bag = {
-      weekly: 2.0,
-      fortnightly: 2.0,
-      threeweekly: 2.0,
-    };
-    const deposit = 25.0; // just a guide
-    return { base, bag, deposit };
-  }, []);
 
   const covered = checked && routeResult?.in_area && routeResult?.default;
   const matchesSorted = useMemo(
@@ -105,12 +177,37 @@ export default function BinsBags() {
     [routeResult?.matches]
   );
 
-  const totalGuide = useMemo(() => {
-    const base = priceGuide.base[frequency] || 0;
-    const bag = (priceGuide.bag[frequency] || 0) * clampInt(extraBags, 0, 10);
-    const deposit = useOwnBin ? 0 : priceGuide.deposit;
-    return base + bag + deposit;
-  }, [priceGuide, frequency, extraBags, useOwnBin]);
+  const routeDay = routeResult?.default?.route_day || null;
+  const startOptions = useMemo(() => {
+    if (!covered || !routeDay) return [];
+    return nextOccurrencesOfDay(routeDay, 6);
+  }, [covered, routeDay]);
+
+  // When coverage changes, set default start date to first option.
+  useMemo(() => {
+    if (!covered) return;
+    if (!startOptions.length) return;
+    if (!startDate || !startOptions.includes(startDate)) {
+      setStartDate(startOptions[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [covered, routeDay]);
+
+  const depositApplied = covered ? !useOwnBin : false;
+
+  const dueTodayAtCheckout = useMemo(() => {
+    // Stripe will charge the first recurring period immediately at checkout, plus deposit if applicable.
+    const bin = STRIPE_PRICES.bin;
+    const bags = STRIPE_PRICES.bag * clampInt(extraBags, 0, 10);
+    const deposit = depositApplied ? STRIPE_PRICES.deposit : 0;
+    return bin + bags + deposit;
+  }, [extraBags, depositApplied]);
+
+  const recurringPerCycle = useMemo(() => {
+    const bin = STRIPE_PRICES.bin;
+    const bags = STRIPE_PRICES.bag * clampInt(extraBags, 0, 10);
+    return bin + bags;
+  }, [extraBags]);
 
   async function onCheckPostcode() {
     setCheckError("");
@@ -145,7 +242,6 @@ export default function BinsBags() {
   async function subscribe() {
     setSubmitError("");
 
-    // Require postcode coverage check
     if (!covered) {
       setSubmitError("Please check your postcode first.");
       return;
@@ -155,6 +251,11 @@ export default function BinsBags() {
 
     if (!email.trim() || !pc || !address.trim()) {
       setSubmitError("Please fill in email, postcode, and address.");
+      return;
+    }
+
+    if (!startDate) {
+      setSubmitError("Please choose your first collection start date.");
       return;
     }
 
@@ -172,10 +273,7 @@ export default function BinsBags() {
           frequency,
           extraBags: clampInt(extraBags, 0, 10),
           useOwnBin: !!useOwnBin,
-
-          // IMPORTANT:
-          // Do NOT send routeDay/routeArea anymore.
-          // Backend assigns route from /api/route-lookup and writes route_day/route_area/route_slot + next_collection_date.
+          startDate, // ✅ chosen first collection date (YYYY-MM-DD)
         }),
       });
 
@@ -206,7 +304,7 @@ export default function BinsBags() {
           <div>
             <h1 className="text-3xl font-semibold text-gray-900">Bins & Bags</h1>
             <p className="mt-1 text-sm text-gray-600">
-              Domestic bin collections — ops-first, simple, reliable.
+              Domestic bin collections — simple, reliable, ops-first.
             </p>
           </div>
           <Link
@@ -221,7 +319,7 @@ export default function BinsBags() {
         <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-900">1) Check your postcode</h2>
           <p className="mt-1 text-xs text-gray-600">
-            We’ll confirm your collection area and days before you subscribe.
+            We’ll confirm your collection area and time before you subscribe.
           </p>
 
           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -229,7 +327,7 @@ export default function BinsBags() {
               value={postcode}
               onChange={(e) => setPostcode(e.target.value)}
               className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-              placeholder="e.g. CF36 5AA"
+              placeholder="e.g. CF71 7AA"
             />
             <button
               type="button"
@@ -272,12 +370,30 @@ export default function BinsBags() {
                   </ul>
                 </div>
 
-                {routeResult.default?.next_date ? (
-                  <div className="mt-2 text-xs text-emerald-800">
-                    Next collection date (default):{" "}
-                    <span className="font-semibold">{routeResult.default.next_date}</span>
+                <div className="mt-3 rounded-xl bg-white/60 p-3 text-xs text-emerald-900">
+                  <div className="font-semibold">Choose your first collection start date</div>
+                  <div className="mt-1 text-emerald-800">
+                    Your normal collection day is{" "}
+                    <span className="font-semibold">{routeDay}</span>.
                   </div>
-                ) : null}
+
+                  <div className="mt-2">
+                    <select
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900"
+                    >
+                      {startOptions.map((ymd) => (
+                        <option key={ymd} value={ymd}>
+                          {formatStartOption(ymd)}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-1 text-xs text-emerald-800">
+                      This will be your <span className="font-semibold">first</span> collection date.
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           ) : null}
@@ -306,6 +422,9 @@ export default function BinsBags() {
                 <option value="fortnightly">Fortnightly</option>
                 <option value="threeweekly">3-weekly</option>
               </select>
+              <div className="mt-1 text-xs text-gray-500">
+                Billed {frequencyLabel(frequency)}.
+              </div>
             </div>
 
             <div>
@@ -333,13 +452,45 @@ export default function BinsBags() {
             </div>
           </div>
 
+          {/* Exact Stripe-aligned pricing breakdown */}
           <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-900">
-            <div className="flex items-center justify-between">
-              <div className="font-semibold">Estimated total today</div>
-              <div className="text-lg font-semibold">{fmtGBP(totalGuide)}</div>
+            <div className="text-sm font-semibold">Pricing (exact)</div>
+
+            <div className="mt-2 space-y-1 text-sm">
+              <div className="flex items-center justify-between">
+                <div>Bin collection ({frequencyLabel(frequency)})</div>
+                <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bin)}</div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div>
+                  Extra bags ({clampInt(extraBags, 0, 10)} × {fmtGBP(STRIPE_PRICES.bag)} {frequencyLabel(frequency)})
+                </div>
+                <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bag * clampInt(extraBags, 0, 10))}</div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div>Bin deposit (one-off)</div>
+                <div className="font-semibold">{fmtGBP(depositApplied ? STRIPE_PRICES.deposit : 0)}</div>
+              </div>
             </div>
-            <div className="mt-1 text-xs text-gray-600">
-              This is a guide only — Stripe checkout is the source of truth.
+
+            <div className="mt-3 border-t border-gray-200 pt-3">
+              <div className="flex items-center justify-between">
+                <div className="font-semibold">Due today at checkout</div>
+                <div className="text-lg font-semibold">{fmtGBP(dueTodayAtCheckout)}</div>
+              </div>
+
+              <div className="mt-1 text-xs text-gray-600">
+                Then <span className="font-semibold">{fmtGBP(recurringPerCycle)}</span>{" "}
+                {frequencyLabel(frequency)} (until cancelled).
+              </div>
+
+              {!covered ? (
+                <div className="mt-2 text-xs text-amber-700">
+                  Pricing will apply once your postcode is confirmed in-area.
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -404,14 +555,20 @@ export default function BinsBags() {
             <button
               type="button"
               onClick={subscribe}
-              disabled={submitting || !covered}
+              disabled={submitting || !covered || !startDate}
               className={classNames(
                 "rounded-lg px-5 py-2 text-sm font-semibold",
-                submitting || !covered
+                submitting || !covered || !startDate
                   ? "bg-gray-300 text-gray-600 cursor-not-allowed"
                   : "bg-gray-900 text-white hover:bg-black"
               )}
-              title={!covered ? "Check your postcode first" : "Continue to payment"}
+              title={
+                !covered
+                  ? "Check your postcode first"
+                  : !startDate
+                  ? "Choose your first collection date"
+                  : "Continue to payment"
+              }
             >
               {submitting ? "Redirecting…" : "Continue to payment"}
             </button>
@@ -420,6 +577,12 @@ export default function BinsBags() {
           {!covered ? (
             <div className="mt-2 text-xs text-gray-500">
               You must check your postcode and be in-area before subscribing.
+            </div>
+          ) : null}
+
+          {covered && !startDate ? (
+            <div className="mt-2 text-xs text-gray-500">
+              Choose your first collection date before continuing.
             </div>
           ) : null}
         </div>
