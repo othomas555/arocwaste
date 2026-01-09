@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 function getBearerToken(req) {
   const h = req.headers.authorization || "";
