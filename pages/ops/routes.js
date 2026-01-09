@@ -2,12 +2,35 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 
-const DAYS_MON_FRI = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const SLOTS = ["AM", "PM", "ANY"];
 
-function classNames(...xs) {
+function cx(...xs) {
   return xs.filter(Boolean).join(" ");
+}
+
+function safeStr(x) {
+  return (x ?? "").toString();
+}
+
+function normalisePrefixesFromText(text) {
+  // Supports newline and comma separated, trims, uppercases, de-dupes.
+  const raw = safeStr(text)
+    .replace(/\r/g, "\n")
+    .split(/[\n,]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => s.toUpperCase().replace(/\s+/g, " ").trim());
+
+  const out = [];
+  const seen = new Set();
+  for (const p of raw) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 function prefixesToText(arr) {
@@ -15,199 +38,302 @@ function prefixesToText(arr) {
   return arr.join("\n");
 }
 
+async function apiJSON(url, opts) {
+  const res = await fetch(url, opts);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error || "Request failed");
+  return json;
+}
+
 export default function OpsRoutes({ initial }) {
   const [rows, setRows] = useState(initial || []);
-  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Modal state
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState("create"); // create | edit
-  const [editId, setEditId] = useState(null);
+  // Filters
+  const [q, setQ] = useState("");
+  const [showInactive, setShowInactive] = useState(false);
 
-  const [name, setName] = useState("");
-  const [routeDay, setRouteDay] = useState("Monday");
-  const [slot, setSlot] = useState("AM");
-  const [active, setActive] = useState(true);
-  const [postcodesText, setPostcodesText] = useState("");
-  const [notes, setNotes] = useState("");
+  // Editor (side panel)
+  const [open, setOpen] = useState(false);
+  const [areaName, setAreaName] = useState(""); // selected area group
+  const [draftName, setDraftName] = useState("");
+  const [draftActive, setDraftActive] = useState(true);
+  const [draftNotes, setDraftNotes] = useState("");
+  const [draftPostcodesText, setDraftPostcodesText] = useState("");
+  const [schedule, setSchedule] = useState(() => {
+    const init = {};
+    for (const d of ALL_DAYS) {
+      init[d] = { AM: false, PM: false, ANY: false };
+    }
+    return init;
+  });
 
   const grouped = useMemo(() => {
-    // name -> day -> [entries]
+    // name -> { entries: [], byDay: { Monday: {AM: entry, ...}} }
     const map = new Map();
     for (const r of rows || []) {
-      const n = String(r.name || "").trim();
-      if (!n) continue;
-      if (!map.has(n)) map.set(n, {});
-      const byDay = map.get(n);
-      const d = r.route_day || "";
-      if (!byDay[d]) byDay[d] = [];
-      byDay[d].push(r);
+      const name = safeStr(r.name).trim();
+      if (!name) continue;
+      if (!map.has(name)) map.set(name, { entries: [], byDay: {} });
+      const g = map.get(name);
+      g.entries.push(r);
+
+      const day = safeStr(r.route_day).trim();
+      const slot = safeStr(r.slot).trim() || "ANY";
+      if (!g.byDay[day]) g.byDay[day] = {};
+      g.byDay[day][slot] = r;
     }
-    // sort entries in each cell by slot order
-    for (const [, byDay] of map.entries()) {
-      for (const d of Object.keys(byDay)) {
-        byDay[d].sort((a, b) => {
-          const ai = SLOTS.indexOf(a.slot || "ANY");
-          const bi = SLOTS.indexOf(b.slot || "ANY");
-          return ai - bi;
-        });
-      }
-    }
-    // sorted area names
+
     const names = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
     return { map, names };
   }, [rows]);
 
-  function resetForm() {
-    setName("");
-    setRouteDay("Monday");
-    setSlot("AM");
-    setActive(true);
-    setPostcodesText("");
-    setNotes("");
-    setEditId(null);
-  }
+  const filteredAreaNames = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const out = [];
+    for (const name of grouped.names) {
+      const g = grouped.map.get(name);
+      if (!g) continue;
 
-  function openCreate(prefill = {}) {
-    setError("");
-    resetForm();
-    setMode("create");
-    setName(prefill.name || "");
-    setRouteDay(prefill.route_day || "Monday");
-    setSlot(prefill.slot || "AM");
-    setOpen(true);
-  }
+      // hide fully inactive areas unless showInactive
+      const hasAnyActive = g.entries.some((e) => e.active !== false);
+      if (!showInactive && !hasAnyActive) continue;
 
-  function openEdit(r) {
-    setError("");
-    setMode("edit");
-    setEditId(r.id);
-    setName(r.name || "");
-    setRouteDay(r.route_day || "Monday");
-    setSlot(r.slot || "AM");
-    setActive(r.active !== false);
-    setPostcodesText(prefixesToText(r.postcode_prefixes));
-    setNotes(r.notes || "");
-    setOpen(true);
-  }
+      if (!needle) {
+        out.push(name);
+        continue;
+      }
+
+      const hay = [
+        name,
+        ...g.entries.map((e) => safeStr(e.route_day)),
+        ...g.entries.map((e) => safeStr(e.slot)),
+        ...g.entries.flatMap((e) => (Array.isArray(e.postcode_prefixes) ? e.postcode_prefixes : [])),
+        ...g.entries.map((e) => safeStr(e.notes)),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      if (hay.includes(needle)) out.push(name);
+    }
+    return out;
+  }, [grouped, q, showInactive]);
+
+  const postcodeCountByArea = useMemo(() => {
+    // union prefixes across ALL entries for that area name
+    const map = new Map();
+    for (const [name, g] of grouped.map.entries()) {
+      const set = new Set();
+      for (const e of g.entries) {
+        if (Array.isArray(e.postcode_prefixes)) {
+          for (const p of e.postcode_prefixes) set.add(p);
+        }
+      }
+      map.set(name, set.size);
+    }
+    return map;
+  }, [grouped]);
 
   async function refresh() {
-    const res = await fetch("/api/ops/route-areas");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Failed to refresh.");
-    setRows(data.data || []);
+    setLoading(true);
+    setError("");
+    try {
+      const json = await apiJSON("/api/ops/route-areas");
+      setRows(json.data || []);
+    } catch (e) {
+      setError(e?.message || "Failed to refresh");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  async function onSave() {
+  function blankSchedule() {
+    const init = {};
+    for (const d of ALL_DAYS) init[d] = { AM: false, PM: false, ANY: false };
+    return init;
+  }
+
+  function openEditorForArea(name) {
+    setError("");
+    const g = grouped.map.get(name);
+    if (!g) return;
+
+    setAreaName(name);
+    setDraftName(name);
+
+    // “Area-level” fields — take from the first entry (we’ll apply to all)
+    const first = g.entries[0];
+    setDraftActive(first?.active !== false);
+    setDraftNotes(first?.notes || "");
+
+    // union prefixes for display
+    const union = [];
+    const seen = new Set();
+    for (const e of g.entries) {
+      if (Array.isArray(e.postcode_prefixes)) {
+        for (const p of e.postcode_prefixes) {
+          if (!seen.has(p)) {
+            seen.add(p);
+            union.push(p);
+          }
+        }
+      }
+    }
+    union.sort((a, b) => a.localeCompare(b));
+    setDraftPostcodesText(prefixesToText(union));
+
+    // schedule from entries
+    const sch = blankSchedule();
+    for (const e of g.entries) {
+      const day = safeStr(e.route_day);
+      const slot = safeStr(e.slot) || "ANY";
+      if (sch[day] && sch[day][slot] !== undefined) sch[day][slot] = true;
+    }
+    setSchedule(sch);
+
+    setOpen(true);
+  }
+
+  function openCreateArea() {
+    setError("");
+    setAreaName(""); // new
+    setDraftName("");
+    setDraftActive(true);
+    setDraftNotes("");
+    setDraftPostcodesText("");
+    setSchedule(blankSchedule());
+    setOpen(true);
+  }
+
+  function toggleSlot(day, slot) {
+    setSchedule((prev) => ({
+      ...prev,
+      [day]: { ...prev[day], [slot]: !prev[day][slot] },
+    }));
+  }
+
+  const editorSummary = useMemo(() => {
+    const chosen = [];
+    for (const d of ALL_DAYS) {
+      for (const s of SLOTS) {
+        if (schedule?.[d]?.[s]) chosen.push({ day: d, slot: s });
+      }
+    }
+    const prefixes = normalisePrefixesFromText(draftPostcodesText);
+    return {
+      chosen,
+      prefixesCount: prefixes.length,
+    };
+  }, [schedule, draftPostcodesText]);
+
+  async function saveAreaChanges() {
     setError("");
 
-    const trimmedName = name.trim();
+    const trimmedName = safeStr(draftName).trim();
     if (!trimmedName) return setError("Area name is required.");
-    if (!ALL_DAYS.includes(routeDay)) return setError("Pick a valid day.");
-    if (!SLOTS.includes(slot)) return setError("Pick a valid slot (AM/PM/ANY).");
 
-    const payload = {
-      name: trimmedName,
-      route_day: routeDay,
-      slot,
-      active,
-      notes: notes.trim() ? notes.trim() : null,
-      postcode_prefixes: postcodesText, // API normalises this
-    };
+    // Must have at least one schedule entry, otherwise area will do nothing.
+    if (!editorSummary.chosen.length) {
+      return setError("Pick at least one day + slot (AM/PM/ANY).");
+    }
 
-    setSaving(true);
+    const prefixes = normalisePrefixesFromText(draftPostcodesText);
+    const postcodesPayloadText = prefixes.join("\n"); // API normalises; we still send clean text.
+
+    setBusy(true);
     try {
-      if (mode === "create") {
-        const res = await fetch("/api/ops/route-areas", {
+      // Existing entries for original areaName (if editing)
+      const existingGroup = areaName ? grouped.map.get(areaName) : null;
+      const existingEntries = existingGroup?.entries || [];
+
+      // Build desired set of (day|slot)
+      const desiredKeys = new Set(editorSummary.chosen.map((x) => `${x.day}|${x.slot}`));
+
+      // Map existing keys -> entry
+      const existingByKey = new Map();
+      for (const e of existingEntries) {
+        const k = `${safeStr(e.route_day)}|${safeStr(e.slot) || "ANY"}`;
+        existingByKey.set(k, e);
+      }
+
+      // 1) If renaming area: we handle it by:
+      // - update all existing entries name via PUT
+      // (and any new created will use trimmedName)
+      const isRename = areaName && trimmedName !== areaName;
+
+      // 2) Create missing entries
+      for (const k of desiredKeys) {
+        if (existingByKey.has(k)) continue;
+        const [day, slot] = k.split("|");
+
+        await apiJSON("/api/ops/route-areas", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            name: trimmedName,
+            route_day: day,
+            slot,
+            active: !!draftActive,
+            notes: safeStr(draftNotes).trim() ? safeStr(draftNotes).trim() : null,
+            postcode_prefixes: postcodesPayloadText,
+          }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "Create failed.");
-      } else {
-        const res = await fetch(`/api/ops/route-areas/${editId}`, {
+      }
+
+      // 3) Update kept entries (and rename if needed)
+      for (const [k, e] of existingByKey.entries()) {
+        if (!desiredKeys.has(k)) continue;
+
+        await apiJSON(`/api/ops/route-areas/${e.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            name: trimmedName, // applies rename too
+            active: !!draftActive,
+            notes: safeStr(draftNotes).trim() ? safeStr(draftNotes).trim() : null,
+            postcode_prefixes: postcodesPayloadText,
+          }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "Update failed.");
+      }
+
+      // 4) Delete removed entries
+      for (const [k, e] of existingByKey.entries()) {
+        if (desiredKeys.has(k)) continue;
+
+        await apiJSON(`/api/ops/route-areas/${e.id}`, { method: "DELETE" });
       }
 
       await refresh();
+
+      // If rename, move selection to new name
+      setAreaName(trimmedName);
       setOpen(false);
-      resetForm();
     } catch (e) {
       setError(e?.message || "Save failed.");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
-  async function onToggleActive(r) {
-    setError("");
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/ops/route-areas/${r.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active: !(r.active !== false) }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Update failed.");
-      await refresh();
-    } catch (e) {
-      setError(e?.message || "Update failed.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function onDelete(r) {
-    setError("");
-    const ok = window.confirm(
-      `Delete "${r.name}" on ${r.route_day} (${r.slot})?`
-    );
-    if (!ok) return;
-
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/ops/route-areas/${r.id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Delete failed.");
-      await refresh();
-    } catch (e) {
-      setError(e?.message || "Delete failed.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const allEntriesSorted = useMemo(() => {
-    const copy = [...(rows || [])];
-    copy.sort((a, b) => {
-      const aa = a.active !== false ? 0 : 1;
-      const bb = b.active !== false ? 0 : 1;
-      if (aa !== bb) return aa - bb;
-      const n = String(a.name || "").localeCompare(String(b.name || ""));
-      if (n !== 0) return n;
-      const d = String(a.route_day || "").localeCompare(String(b.route_day || ""));
-      if (d !== 0) return d;
-      return String(a.slot || "").localeCompare(String(b.slot || ""));
+  const weekGrid = useMemo(() => {
+    return filteredAreaNames.map((name) => {
+      const g = grouped.map.get(name);
+      const anyActive = g?.entries?.some((e) => e.active !== false);
+      return { name, g, anyActive };
     });
-    return copy;
-  }, [rows]);
+  }, [filteredAreaNames, grouped]);
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-6xl px-4 py-6">
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div className="mx-auto max-w-7xl px-4 py-6">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-gray-900">Route areas</h1>
+            <h1 className="text-2xl font-semibold text-gray-900">Routes</h1>
             <p className="text-sm text-gray-600">
-              Manage areas + set run day + AM/PM + postcode coverage.
+              Week view first. Click an area to edit schedule + postcodes.
             </p>
           </div>
 
@@ -228,10 +354,10 @@ export default function OpsRoutes({ initial }) {
 
             <button
               type="button"
-              onClick={() => openCreate()}
+              onClick={openCreateArea}
               className="rounded-lg bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-black"
             >
-              Add entry
+              New area
             </button>
           </div>
         </div>
@@ -242,92 +368,134 @@ export default function OpsRoutes({ initial }) {
           </div>
         ) : null}
 
-        {/* Week view */}
-        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-gray-900">Week view (Mon–Fri)</h2>
-              <p className="text-xs text-gray-600">
-                Each area can appear multiple days (e.g. Porthcawl Mon/Wed/Fri AM).
-              </p>
-            </div>
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex w-full gap-2 sm:max-w-xl">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search areas, postcodes, notes..."
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+            />
             <button
               type="button"
-              onClick={() => openCreate({ slot: "AM" })}
+              onClick={() => setQ("")}
               className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
             >
-              Quick add (AM)
+              Clear
             </button>
           </div>
 
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-gray-800">
+              <input
+                type="checkbox"
+                checked={showInactive}
+                onChange={(e) => setShowInactive(e.target.checked)}
+              />
+              Show inactive areas
+            </label>
+
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={loading}
+              className={cx(
+                "rounded-lg border px-3 py-2 text-sm font-medium",
+                loading
+                  ? "border-gray-200 bg-gray-100 text-gray-500"
+                  : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50"
+              )}
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {/* Week grid */}
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Week view (Mon–Sun)</h2>
+              <p className="text-xs text-gray-600">
+                Cells show AM / PM / ANY entries. Click an area row to edit.
+              </p>
+            </div>
+            <div className="text-xs text-gray-500">
+              Total areas: <span className="font-semibold">{weekGrid.length}</span>
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
-            <table className="min-w-[900px] w-full text-sm">
+            <table className="min-w-[1100px] w-full text-sm">
               <thead className="bg-gray-50 text-xs text-gray-600">
                 <tr>
                   <th className="px-3 py-2 text-left">Area</th>
-                  {DAYS_MON_FRI.map((d) => (
+                  <th className="px-3 py-2 text-left">Postcodes</th>
+                  {ALL_DAYS.map((d) => (
                     <th key={d} className="px-3 py-2 text-center">
-                      {d}
+                      {d.slice(0, 3)}
                     </th>
                   ))}
                 </tr>
               </thead>
+
               <tbody className="divide-y divide-gray-200">
-                {grouped.names.length ? (
-                  grouped.names.map((areaName) => (
-                    <tr key={areaName} className="bg-white">
-                      <td className="px-3 py-2 font-semibold text-gray-900">
-                        <div className="flex items-center justify-between gap-2">
-                          <span>{areaName}</span>
-                          <button
-                            type="button"
-                            onClick={() => openCreate({ name: areaName, slot: "AM" })}
-                            className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                            title="Add another day for this area"
-                          >
-                            + Add
-                          </button>
+                {weekGrid.length ? (
+                  weekGrid.map(({ name, g, anyActive }) => (
+                    <tr
+                      key={name}
+                      className={cx("bg-white hover:bg-gray-50")}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => openEditorForArea(name)}
+                      title="Click to edit"
+                    >
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className={cx("font-semibold", anyActive ? "text-gray-900" : "text-gray-500")}>
+                            {name}
+                          </span>
+                          {!anyActive ? (
+                            <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700">
+                              inactive
+                            </span>
+                          ) : null}
                         </div>
                       </td>
 
-                      {DAYS_MON_FRI.map((day) => {
-                        const entries = grouped.map.get(areaName)?.[day] || [];
-                        return (
-                          <td key={`${areaName}-${day}`} className="px-3 py-2 align-top">
-                            <div className="flex flex-col items-center gap-2">
-                              <div className="flex flex-wrap justify-center gap-1">
-                                {entries.length ? (
-                                  entries.map((r) => (
-                                    <button
-                                      key={r.id}
-                                      type="button"
-                                      onClick={() => openEdit(r)}
-                                      className={classNames(
-                                        "rounded-md px-2 py-1 text-xs font-semibold",
-                                        r.active !== false
-                                          ? "bg-gray-900 text-white hover:bg-black"
-                                          : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                      )}
-                                      title="Click to edit"
-                                    >
-                                      {r.slot || "ANY"}
-                                    </button>
-                                  ))
-                                ) : (
-                                  <span className="text-xs text-gray-400">—</span>
-                                )}
-                              </div>
+                      <td className="px-3 py-2 text-gray-700">
+                        <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
+                          PC: {postcodeCountByArea.get(name) || 0}
+                        </span>
+                      </td>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  openCreate({ name: areaName, route_day: day, slot: "AM" })
-                                }
-                                className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                              >
-                                + Add
-                              </button>
-                            </div>
+                      {ALL_DAYS.map((day) => {
+                        const cell = g?.byDay?.[day] || {};
+                        const present = SLOTS.filter((s) => !!cell[s]);
+
+                        return (
+                          <td key={`${name}-${day}`} className="px-3 py-2 text-center align-top">
+                            {present.length ? (
+                              <div className="flex flex-wrap justify-center gap-1">
+                                {present.map((slot) => {
+                                  const entry = cell[slot];
+                                  const isOn = entry?.active !== false;
+                                  return (
+                                    <span
+                                      key={slot}
+                                      className={cx(
+                                        "rounded-md px-2 py-1 text-xs font-semibold",
+                                        isOn ? "bg-gray-900 text-white" : "bg-gray-200 text-gray-700"
+                                      )}
+                                      title={isOn ? "Active" : "Inactive"}
+                                    >
+                                      {slot}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-gray-300">—</span>
+                            )}
                           </td>
                         );
                       })}
@@ -335,8 +503,8 @@ export default function OpsRoutes({ initial }) {
                   ))
                 ) : (
                   <tr>
-                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={6}>
-                      No route areas yet. Click <span className="font-semibold">Add entry</span>.
+                    <td className="px-3 py-10 text-center text-sm text-gray-600" colSpan={2 + ALL_DAYS.length}>
+                      No areas match your filter. Click <span className="font-semibold">New area</span> to create one.
                     </td>
                   </tr>
                 )}
@@ -345,241 +513,206 @@ export default function OpsRoutes({ initial }) {
           </div>
 
           <div className="mt-3 text-xs text-gray-500">
-            Each “slot” is a row in <span className="font-mono">route_areas</span>. Duplicate
-            protection is on <span className="font-mono">(name, route_day, slot)</span>.
-          </div>
-        </div>
-
-        {/* All entries */}
-        <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="mb-3">
-            <h2 className="text-sm font-semibold text-gray-900">All entries</h2>
-            <p className="text-xs text-gray-600">
-              Use this to edit postcodes/notes or disable an entry.
-            </p>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-xs text-gray-600">
-                <tr>
-                  <th className="px-3 py-2 text-left">Active</th>
-                  <th className="px-3 py-2 text-left">Area</th>
-                  <th className="px-3 py-2 text-left">Day</th>
-                  <th className="px-3 py-2 text-left">Slot</th>
-                  <th className="px-3 py-2 text-left">Postcode prefixes</th>
-                  <th className="px-3 py-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {allEntriesSorted.length ? (
-                  allEntriesSorted.map((r) => (
-                    <tr key={r.id} className="bg-white">
-                      <td className="px-3 py-2">
-                        <button
-                          type="button"
-                          onClick={() => onToggleActive(r)}
-                          disabled={saving}
-                          className={classNames(
-                            "rounded-lg px-2.5 py-1.5 text-xs font-semibold",
-                            r.active !== false
-                              ? "bg-gray-900 text-white hover:bg-black"
-                              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                          )}
-                        >
-                          {r.active !== false ? "Active" : "Off"}
-                        </button>
-                      </td>
-                      <td className="px-3 py-2 font-medium text-gray-900">{r.name}</td>
-                      <td className="px-3 py-2 text-gray-700">{r.route_day}</td>
-                      <td className="px-3 py-2 text-gray-700">{r.slot}</td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {Array.isArray(r.postcode_prefixes) && r.postcode_prefixes.length ? (
-                          <div className="flex flex-wrap gap-1">
-                            {r.postcode_prefixes.slice(0, 10).map((p) => (
-                              <span
-                                key={p}
-                                className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800"
-                              >
-                                {p}
-                              </span>
-                            ))}
-                            {r.postcode_prefixes.length > 10 ? (
-                              <span className="text-xs text-gray-500">
-                                +{r.postcode_prefixes.length - 10} more
-                              </span>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openEdit(r)}
-                            className="rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDelete(r)}
-                            disabled={saving}
-                            className="rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={6}>
-                      No entries yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            Your data model is one row per <span className="font-mono">(area name + day + slot)</span>. This UI keeps
+            that model, but hides the noise.
           </div>
         </div>
       </div>
 
-      {/* Modal */}
+      {/* Side panel editor */}
       {open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl">
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/40">
+          <div className="h-full w-full max-w-xl bg-white shadow-xl">
             <div className="border-b border-gray-200 p-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="text-sm font-semibold text-gray-900">
-                    {mode === "create" ? "Add entry" : "Edit entry"}
+                    {areaName ? "Edit area" : "New area"}
                   </div>
                   <div className="mt-1 text-xs text-gray-600">
-                    One entry = one day + slot for an area.
+                    Schedule is day × slot toggles. Postcodes/notes/active apply to the whole area.
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
                   className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50"
+                  disabled={busy}
                 >
                   Close
                 </button>
               </div>
             </div>
 
-            <div className="p-4">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-gray-700">Area name</label>
+            <div className="p-4 space-y-4">
+              {/* Name */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Area name</label>
+                <input
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="e.g. Porthcawl"
+                  disabled={busy}
+                />
+                {areaName && safeStr(draftName).trim() !== areaName ? (
+                  <div className="mt-1 text-xs text-amber-700">
+                    Renaming will update all entries for this area.
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Active + Notes */}
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3">
+                <label className="flex items-center gap-2 text-sm text-gray-900">
                   <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                    placeholder="e.g. Porthcawl"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700">Run day</label>
-                  <select
-                    value={routeDay}
-                    onChange={(e) => setRouteDay(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                  >
-                    {ALL_DAYS.map((d) => (
-                      <option key={d} value={d}>
-                        {d}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700">Slot</label>
-                  <select
-                    value={slot}
-                    onChange={(e) => setSlot(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                  >
-                    {SLOTS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="mt-1 text-xs text-gray-500">Use AM/PM if splitting the day.</div>
-                </div>
-
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-gray-700">
-                    Postcode prefixes (one per line, or comma separated)
-                  </label>
-                  <textarea
-                    value={postcodesText}
-                    onChange={(e) => setPostcodesText(e.target.value)}
-                    className="mt-1 h-32 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                    placeholder={`Examples:\nCF36\nCF33 4\nCF33 6`}
-                  />
-                </div>
-
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-gray-700">Notes (optional)</label>
-                  <input
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                    placeholder="Anything ops should know"
-                  />
-                </div>
-
-                <div className="sm:col-span-2 flex items-center gap-2">
-                  <input
-                    id="active"
                     type="checkbox"
-                    checked={active}
-                    onChange={(e) => setActive(e.target.checked)}
+                    checked={draftActive}
+                    onChange={(e) => setDraftActive(e.target.checked)}
+                    disabled={busy}
                   />
-                  <label htmlFor="active" className="text-sm text-gray-900">
-                    Active
-                  </label>
+                  Active
+                </label>
+                <div className="text-xs text-gray-600">
+                  If inactive, it still exists but won’t be used (unless your code ignores active — we can enforce later).
                 </div>
               </div>
 
-              {error ? (
-                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-                  {error}
-                </div>
-              ) : null}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Notes (optional)</label>
+                <input
+                  value={draftNotes}
+                  onChange={(e) => setDraftNotes(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="Anything ops should know"
+                  disabled={busy}
+                />
+              </div>
 
-              <div className="mt-4 flex items-center justify-end gap-2">
+              {/* Schedule */}
+              <div className="rounded-xl border border-gray-200 p-3">
+                <div className="mb-2">
+                  <div className="text-sm font-semibold text-gray-900">Schedule</div>
+                  <div className="text-xs text-gray-600">
+                    Toggle slots for each day. This creates/deletes (day+slot) rows behind the scenes.
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-xs text-gray-600">
+                      <tr>
+                        <th className="px-2 py-2 text-left">Day</th>
+                        {SLOTS.map((s) => (
+                          <th key={s} className="px-2 py-2 text-center">
+                            {s}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {ALL_DAYS.map((d) => (
+                        <tr key={d}>
+                          <td className="px-2 py-2 text-gray-900 font-medium">{d}</td>
+                          {SLOTS.map((s) => (
+                            <td key={`${d}-${s}`} className="px-2 py-2 text-center">
+                              <button
+                                type="button"
+                                onClick={() => toggleSlot(d, s)}
+                                disabled={busy}
+                                className={cx(
+                                  "rounded-lg border px-3 py-1.5 text-xs font-semibold",
+                                  schedule?.[d]?.[s]
+                                    ? "border-gray-900 bg-gray-900 text-white hover:bg-black"
+                                    : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50"
+                                )}
+                              >
+                                {schedule?.[d]?.[s] ? "On" : "Off"}
+                              </button>
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-2 text-xs text-gray-600">
+                  Selected entries: <span className="font-semibold">{editorSummary.chosen.length}</span>
+                </div>
+              </div>
+
+              {/* Postcodes */}
+              <div className="rounded-xl border border-gray-200 p-3">
+                <div className="mb-2 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">Postcode prefixes</div>
+                    <div className="text-xs text-gray-600">
+                      Paste one per line or comma-separated. We de-dupe and uppercase.
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    Count: <span className="font-semibold">{editorSummary.prefixesCount}</span>
+                  </div>
+                </div>
+
+                <textarea
+                  value={draftPostcodesText}
+                  onChange={(e) => setDraftPostcodesText(e.target.value)}
+                  className="h-40 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder={`Examples:\nCF36\nCF33 4\nCF33 6`}
+                  disabled={busy}
+                />
+
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      const cleaned = normalisePrefixesFromText(draftPostcodesText).join("\n");
+                      setDraftPostcodesText(cleaned);
+                    }}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                  >
+                    Clean + de-dupe
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setDraftPostcodesText("")}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+
+              {/* Save */}
+              <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
-                  disabled={saving}
+                  disabled={busy}
                   className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={onSave}
-                  disabled={saving}
-                  className={classNames(
+                  onClick={saveAreaChanges}
+                  disabled={busy}
+                  className={cx(
                     "rounded-lg px-4 py-2 text-sm font-semibold",
-                    saving ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
+                    busy ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
                   )}
                 >
-                  {saving ? "Saving…" : "Save"}
+                  {busy ? "Saving…" : "Save changes"}
                 </button>
               </div>
 
-              <div className="mt-3 text-xs text-gray-500">
-                Duplicate protection: you can’t create the exact same (Area + Day + Slot) twice.
+              <div className="text-xs text-gray-500">
+                This editor updates rows via your existing APIs. No new tables. No hidden logic.
               </div>
             </div>
           </div>
