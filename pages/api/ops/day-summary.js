@@ -1,47 +1,361 @@
-// pages/api/ops/day-summary.js
-import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+import Stripe from "stripe";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
-function isValidYMD(s) {
-  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+const secretKey = process.env.STRIPE_SECRET_KEY;
+
+function clampQty(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 1;
+  return Math.max(1, Math.min(50, Math.trunc(x)));
 }
 
-function normSlot(s) {
-  const x = String(s || "").trim().toUpperCase();
-  if (x === "AM" || x === "PM" || x === "ANY") return x;
-  return ""; // blank treated as blank
+function buildItemsSummary(items) {
+  const clean = Array.isArray(items) ? items.filter((x) => x && x.title) : [];
+  if (!clean.length) return "";
+  const first = String(clean[0].title || "Item");
+  if (clean.length === 1) return first;
+  return `${first} + ${clean.length - 1} more`;
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  if (!secretKey || !secretKey.startsWith("sk_")) {
+    return res.status(500).json({
+      error:
+        "Missing or invalid STRIPE_SECRET_KEY in Vercel Environment Variables (must start with sk_).",
+    });
+  }
+
+  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+
   try {
-    const date = String(req.query.date || "").trim();
-    if (!isValidYMD(date)) return res.status(400).json({ error: "Invalid date (YYYY-MM-DD)" });
+    const body = req.body || {};
+    const mode = String(body.mode || "single"); // "single" or "basket"
 
-    const supabaseAdmin = getSupabaseAdmin();
+    const email = body.email;
+    const postcode = body.postcode;
+    const address = body.address;
+    const date = body.date;
 
-    // Pull all subs due that day. (We’ll add paused filtering if needed once we confirm your fields.)
-    const { data, error } = await supabaseAdmin
-      .from("subscriptions")
-      .select("id, route_area, route_slot, next_collection_date, status")
-      .eq("next_collection_date", date);
+    const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
 
-    if (error) throw new Error(error.message);
+    const totalPounds = Number(body.total);
+    if (!Number.isFinite(totalPounds) || totalPounds <= 0) {
+      return res.status(400).json({ error: "Invalid total amount" });
+    }
+    const totalPence = Math.round(totalPounds * 100);
 
-    const dueCounts = {};
-    for (const s of data || []) {
-      const area = String(s.route_area || "").trim();
-      const slot = normSlot(s.route_slot || "ANY") || "ANY";
-      if (!area) continue;
-      const key = `${area}|${slot}`;
-      dueCounts[key] = (dueCounts[key] || 0) + 1;
+    // ---- BASKET MODE ----
+    if (mode === "basket") {
+      const items = Array.isArray(body.items) ? body.items : [];
+
+      if (!email || !postcode || !address || !date) {
+        return res.status(400).json({ error: "Missing required booking fields" });
+      }
+      if (!items.length) {
+        return res.status(400).json({ error: "Basket is empty" });
+      }
+
+      const cleanItems = items
+        .filter((x) => x && x.title)
+        .map((x) => ({
+          id: String(x.id || ""),
+          category: String(x.category || ""),
+          slug: String(x.slug || ""),
+          title: String(x.title || ""),
+          unitPrice: Number(x.unitPrice || 0),
+          qty: clampQty(x.qty),
+        }))
+        .filter((x) => x.qty >= 1);
+
+      if (!cleanItems.length) {
+        return res.status(400).json({ error: "Basket is empty" });
+      }
+
+      const timeAdd = Number(body.timeAdd ?? 0);
+      const removeAdd = Number(body.removeAdd ?? 0);
+
+      const lineItems = [];
+
+      for (const it of cleanItems) {
+        const unitPence = Math.round((Number(it.unitPrice) || 0) * 100);
+        if (unitPence <= 0) continue;
+
+        lineItems.push({
+          quantity: it.qty,
+          price_data: {
+            currency: "gbp",
+            unit_amount: unitPence,
+            product_data: {
+              name: `AROC Waste – ${it.title}`,
+              description: it.category ? `Category: ${it.category}` : undefined,
+            },
+          },
+        });
+      }
+
+      if (Number.isFinite(timeAdd) && timeAdd > 0) {
+        lineItems.push({
+          quantity: 1,
+          price_data: {
+            currency: "gbp",
+            unit_amount: Math.round(timeAdd * 100),
+            product_data: { name: "Time option" },
+          },
+        });
+      }
+
+      if (Number.isFinite(removeAdd) && removeAdd > 0) {
+        lineItems.push({
+          quantity: 1,
+          price_data: {
+            currency: "gbp",
+            unit_amount: Math.round(removeAdd * 100),
+            product_data: { name: "Remove from property" },
+          },
+        });
+      }
+
+      // Ensure Stripe total matches UI total (small adjustment only)
+      const computedPence = lineItems.reduce((sum, li) => {
+        const qty = Number(li.quantity) || 0;
+        const amt = Number(li.price_data?.unit_amount) || 0;
+        return sum + qty * amt;
+      }, 0);
+
+      const diff = totalPence - computedPence;
+      if (diff !== 0) {
+        if (Math.abs(diff) > 500) {
+          return res.status(400).json({
+            error:
+              "Price mismatch between basket items and total. Please refresh and try again.",
+          });
+        }
+
+        lineItems.push({
+          quantity: 1,
+          price_data: {
+            currency: "gbp",
+            unit_amount: diff,
+            product_data: {
+              name: "Order adjustment",
+              description: "Auto-adjust to match checkout total",
+            },
+          },
+        });
+      }
+
+      const itemsSummary = buildItemsSummary(cleanItems);
+
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        payment_method_types: ["card"],
+        customer_email: email,
+        line_items: lineItems,
+
+        // ✅ Keep metadata small (<= 500 chars each)
+        metadata: {
+          mode: "basket",
+          item_count: String(cleanItems.length),
+          items_summary: itemsSummary, // short summary only
+          time: String(body.time ?? ""),
+          timeAdd: String(body.timeAdd ?? ""),
+          remove: String(body.remove ?? ""),
+          removeAdd: String(body.removeAdd ?? ""),
+          date: String(body.date ?? ""),
+          routeDay: String(body.routeDay ?? ""),
+          routeArea: String(body.routeArea ?? ""),
+          name: String(body.name ?? ""),
+          phone: String(body.phone ?? ""),
+          postcode: String(body.postcode ?? ""),
+          address: String(body.address ?? ""),
+          notes: String(body.notes ?? ""),
+          total: String(body.total ?? ""),
+        },
+
+        success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/cancel`,
+      });
+
+      // Supabase upsert (best effort) — ✅ full items stored here
+      try {
+        const supabaseAdmin = getSupabaseAdmin();
+
+        if (supabaseAdmin) {
+          const payload = {
+            mode: "basket",
+            items: cleanItems,
+            time: String(body.time ?? ""),
+            timeAdd: Number(body.timeAdd ?? 0),
+            remove: String(body.remove ?? ""),
+            removeAdd: Number(body.removeAdd ?? 0),
+            date: String(body.date ?? ""),
+            routeDay: String(body.routeDay ?? ""),
+            routeArea: String(body.routeArea ?? ""),
+            name: String(body.name ?? ""),
+            phone: String(body.phone ?? ""),
+            postcode: String(body.postcode ?? ""),
+            address: String(body.address ?? ""),
+            notes: String(body.notes ?? ""),
+            total: Number(body.total ?? 0),
+          };
+
+          const { error: upsertErr } = await supabaseAdmin
+            .from("bookings")
+            .upsert(
+              {
+                stripe_session_id: session.id,
+                payment_status: "pending",
+                title: "Basket order",
+                collection_date: String(body.date ?? ""),
+                name: String(body.name ?? ""),
+                email: String(body.email ?? ""),
+                phone: String(body.phone ?? ""),
+                postcode: String(body.postcode ?? ""),
+                address: String(body.address ?? ""),
+                notes: String(body.notes ?? ""),
+                route_day: String(body.routeDay ?? ""),
+                route_area: String(body.routeArea ?? ""),
+                total_pence: totalPence,
+                payload,
+              },
+              { onConflict: "stripe_session_id" }
+            );
+
+          if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
+        } else {
+          console.warn(
+            "Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save."
+          );
+        }
+      } catch (e) {
+        console.error("Supabase save failed:", e?.message || e);
+      }
+
+      return res.status(200).json({ url: session.url });
     }
 
-    return res.status(200).json({ ok: true, date, dueCounts });
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    // ---- SINGLE MODE (existing behaviour) ----
+    const title = body.title;
+
+    const qtyRaw = Number(body.qty ?? 1);
+    const qty = Number.isInteger(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+
+    if (!title || !email || !postcode || !address || !date) {
+      return res.status(400).json({ error: "Missing required booking fields" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      customer_email: email,
+
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: "gbp",
+            unit_amount: totalPence,
+            product_data: {
+              name: `AROC Waste – ${title} (x${qty})`,
+              description: `Collection on ${date}`,
+            },
+          },
+        },
+      ],
+
+      metadata: {
+        mode: "single",
+        title: String(body.title ?? ""),
+        qty: String(qty),
+        base: String(body.base ?? ""),
+        time: String(body.time ?? ""),
+        timeAdd: String(body.timeAdd ?? ""),
+        remove: String(body.remove ?? ""),
+        removeAdd: String(body.removeAdd ?? ""),
+        date: String(body.date ?? ""),
+        routeDay: String(body.routeDay ?? ""),
+        routeArea: String(body.routeArea ?? ""),
+        name: String(body.name ?? ""),
+        phone: String(body.phone ?? ""),
+        postcode: String(body.postcode ?? ""),
+        address: String(body.address ?? ""),
+        notes: String(body.notes ?? ""),
+        total: String(body.total ?? ""),
+      },
+
+      success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${origin}/cancel`,
+    });
+
+    // Supabase upsert (best effort)
+    try {
+      const supabaseAdmin = getSupabaseAdmin();
+
+      if (supabaseAdmin) {
+        const payload = {
+          mode: "single",
+          title: String(body.title ?? ""),
+          qty,
+          base: Number(body.base ?? 0),
+          time: String(body.time ?? ""),
+          timeAdd: Number(body.timeAdd ?? 0),
+          remove: String(body.remove ?? ""),
+          removeAdd: Number(body.removeAdd ?? 0),
+          date: String(body.date ?? ""),
+          routeDay: String(body.routeDay ?? ""),
+          routeArea: String(body.routeArea ?? ""),
+          name: String(body.name ?? ""),
+          phone: String(body.phone ?? ""),
+          postcode: String(body.postcode ?? ""),
+          address: String(body.address ?? ""),
+          notes: String(body.notes ?? ""),
+          total: Number(body.total ?? 0),
+        };
+
+        const { error: upsertErr } = await supabaseAdmin
+          .from("bookings")
+          .upsert(
+            {
+              stripe_session_id: session.id,
+              payment_status: "pending",
+              title: String(body.title ?? ""),
+              collection_date: String(body.date ?? ""),
+              name: String(body.name ?? ""),
+              email: String(body.email ?? ""),
+              phone: String(body.phone ?? ""),
+              postcode: String(body.postcode ?? ""),
+              address: String(body.address ?? ""),
+              notes: String(body.notes ?? ""),
+              route_day: String(body.routeDay ?? ""),
+              route_area: String(body.routeArea ?? ""),
+              total_pence: totalPence,
+              payload,
+            },
+            { onConflict: "stripe_session_id" }
+          );
+
+        if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
+      } else {
+        console.warn(
+          "Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save."
+        );
+      }
+    } catch (e) {
+      console.error("Supabase save failed:", e?.message || e);
+    }
+
+    return res.status(200).json({ url: session.url });
+  } catch (err) {
+    const msg =
+      err?.raw?.message ||
+      err?.message ||
+      "Stripe session creation failed (unknown error)";
+    console.error("Stripe error:", msg);
+    return res.status(500).json({ error: msg });
   }
 }
