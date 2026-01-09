@@ -3,157 +3,175 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabaseClient } from "../../../lib/supabaseClient";
 
-function cx(...classes) {
-  return classes.filter(Boolean).join(" ");
+function cx(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
 export default function DriverRunPage() {
   const router = useRouter();
   const { id } = router.query;
 
+  const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState("");
+  const [savingKey, setSavingKey] = useState("");
   const [error, setError] = useState("");
-  const [staff, setStaff] = useState(null);
+
   const [run, setRun] = useState(null);
   const [stops, setStops] = useState([]);
   const [totals, setTotals] = useState({ totalStops: 0, totalExtraBags: 0 });
 
-  async function getTokenOrRedirect() {
-    if (!supabaseClient) throw new Error("Supabase client not configured.");
-    const { data: sessionData } = await supabaseClient.auth.getSession();
-    const token = sessionData?.session?.access_token;
-    if (!token) {
-      window.location.href = "/driver/login";
-      return null;
+  useEffect(() => {
+    let mounted = true;
+    async function init() {
+      if (!supabaseClient) return;
+      const { data } = await supabaseClient.auth.getSession();
+      if (!mounted) return;
+      setSession(data?.session || null);
     }
-    return token;
-  }
+    init();
+    const { data: sub } = supabaseClient.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe?.();
+    };
+  }, []);
 
   async function load() {
     if (!id) return;
-    setLoading(true);
     setError("");
+    setLoading(true);
     try {
-      const token = await getTokenOrRedirect();
-      if (!token) return;
+      const token = session?.access_token;
+      if (!token) throw new Error("Not logged in.");
 
       const res = await fetch(`/api/driver/run/${id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load run");
 
-      setStaff(data.staff || null);
-      setRun(data.run || null);
-      setStops(Array.isArray(data.stops) ? data.stops : []);
-      setTotals(data.totals || { totalStops: 0, totalExtraBags: 0 });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to load run");
+
+      setRun(json.run || null);
+      setStops(Array.isArray(json.stops) ? json.stops : []);
+      setTotals(json.totals || { totalStops: 0, totalExtraBags: 0 });
     } catch (e) {
-      setError(e.message || "Load failed");
+      setError(e?.message || "Load failed");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    if (session?.access_token && id) load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
-
-  const staffNames = useMemo(() => {
-    if (!run?.daily_run_staff) return "";
-    return run.daily_run_staff.map((x) => x.staff?.name).filter(Boolean).join(", ");
-  }, [run]);
+  }, [session?.access_token, id]);
 
   const vehicleLabel = useMemo(() => {
     if (!run?.vehicles) return "— no vehicle —";
-    const v = run.vehicles;
-    return `${v.registration}${v.name ? ` • ${v.name}` : ""}`;
+    return `${run.vehicles.registration}${run.vehicles.name ? ` • ${run.vehicles.name}` : ""}`;
   }, [run]);
 
   async function markCollected(subscription_id) {
-    setSavingId(subscription_id);
+    setSavingKey(subscription_id);
     setError("");
     try {
-      const token = await getTokenOrRedirect();
-      if (!token) return;
+      const token = session?.access_token;
+      if (!token) throw new Error("Not logged in.");
 
       const res = await fetch("/api/driver/mark-collected", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ run_id: id, subscription_id }),
+        body: JSON.stringify({
+          run_id: run?.id,
+          subscription_id,
+          collected_date: run?.run_date,
+        }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed");
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to mark collected");
+
       await load();
     } catch (e) {
-      setError(e.message || "Failed");
+      setError(e?.message || "Failed to mark collected");
     } finally {
-      setSavingId("");
+      setSavingKey("");
     }
   }
 
   async function undoCollected(subscription_id) {
-    setSavingId(subscription_id);
+    setSavingKey(subscription_id);
     setError("");
     try {
-      const token = await getTokenOrRedirect();
-      if (!token) return;
+      const token = session?.access_token;
+      if (!token) throw new Error("Not logged in.");
 
       const res = await fetch("/api/driver/undo-collected", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ run_id: id, subscription_id }),
+        body: JSON.stringify({
+          run_id: run?.id,
+          subscription_id,
+          collected_date: run?.run_date,
+        }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed");
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to undo");
+
       await load();
     } catch (e) {
-      setError(e.message || "Failed");
+      setError(e?.message || "Failed to undo");
     } finally {
-      setSavingId("");
+      setSavingKey("");
     }
   }
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-3xl px-4 py-8">
-        <div className="flex items-start justify-between gap-3">
+      <div className="mx-auto max-w-4xl px-4 py-6">
+        <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <Link href="/driver/my-runs" className="text-sm font-semibold text-slate-900">
-              ← Back to my runs
+            <h1 className="text-2xl font-semibold text-slate-900">Driver • Run</h1>
+            <p className="text-sm text-slate-600">Tick off collections as you go.</p>
+          </div>
+          <div className="flex gap-2">
+            <Link href="/driver/my-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              My runs
             </Link>
-            <h1 className="mt-2 text-xl font-semibold text-slate-900">Run</h1>
-            <p className="text-sm text-slate-600">{staff ? `Logged in as ${staff.name}` : ""}</p>
           </div>
         </div>
 
         {error ? (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-            {error}
-          </div>
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
         ) : null}
 
-        {loading ? (
-          <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+        {!session?.access_token ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
+            You’re not logged in. Go to{" "}
+            <Link className="underline font-semibold" href="/driver/login">
+              /driver/login
+            </Link>
+            .
+          </div>
+        ) : loading ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
             Loading…
           </div>
         ) : !run ? (
-          <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
             Run not found.
           </div>
         ) : (
           <>
-            <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">
-                {run.route_area} • {run.route_day}
+                {run.route_area} • {run.route_day} • {String(run.route_slot || "ANY").toUpperCase()}
               </div>
               <div className="mt-1 text-sm text-slate-600">
                 <span className="font-medium text-slate-700">{run.run_date}</span>
                 <span className="mx-2 text-slate-300">•</span>
                 <span className="font-medium text-slate-700">{vehicleLabel}</span>
-                <span className="mx-2 text-slate-300">•</span>
-                <span>{staffNames || "No staff assigned"}</span>
               </div>
 
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -169,13 +187,13 @@ export default function DriverRunPage() {
             </div>
 
             {stops.length === 0 ? (
-              <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                No due stops for this run.
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
+                No stops due for this run.
               </div>
             ) : (
-              <div className="mt-4 space-y-2 pb-10">
+              <div className="space-y-2 pb-10">
                 {stops.map((s) => (
-                  <div key={s.id} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                  <div key={s.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-base font-semibold text-slate-900">
@@ -205,10 +223,10 @@ export default function DriverRunPage() {
                           <button
                             type="button"
                             onClick={() => undoCollected(s.id)}
-                            disabled={savingId === s.id}
+                            disabled={savingKey === s.id}
                             className={cx(
                               "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingId === s.id
+                              savingKey === s.id
                                 ? "bg-slate-200 text-slate-500 ring-slate-200"
                                 : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                             )}
@@ -219,10 +237,10 @@ export default function DriverRunPage() {
                           <button
                             type="button"
                             onClick={() => markCollected(s.id)}
-                            disabled={savingId === s.id}
+                            disabled={savingKey === s.id}
                             className={cx(
                               "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingId === s.id
+                              savingKey === s.id
                                 ? "bg-slate-200 text-slate-500 ring-slate-200"
                                 : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
                             )}
