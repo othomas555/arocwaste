@@ -99,7 +99,6 @@ function slotScore(slot) {
 }
 
 function londonTodayParts() {
-  // Get today's date + weekday in Europe/London (avoids UTC drift on Vercel)
   const dateParts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     year: "numeric",
@@ -120,20 +119,37 @@ function londonTodayParts() {
 
   return {
     ymd: `${y}-${m}-${d}`,
-    weekday, // e.g. "Monday"
+    weekday,
   };
 }
 
-function addDaysYMD(ymd, n) {
-  // ymd is YYYY-MM-DD in London context; safe to treat as date-only.
-  // We'll convert using UTC to avoid timezone issues, since we're only moving by whole days.
+function isValidYMD(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+// Use noon UTC to avoid DST oddities for date-only math.
+function ymdToDateNoonUTC(ymd) {
   const [Y, M, D] = ymd.split("-").map((x) => Number(x));
-  const dt = new Date(Date.UTC(Y, M - 1, D));
-  dt.setUTCDate(dt.getUTCDate() + n);
+  return new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
+}
+function dateToYMDUTC(dt) {
   const y = dt.getUTCFullYear();
   const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
   const d = String(dt.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+
+function addDaysYMD(ymd, n) {
+  const dt = ymdToDateNoonUTC(ymd);
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dateToYMDUTC(dt);
+}
+
+function weekdayNameOfYMD(ymd) {
+  const dt = ymdToDateNoonUTC(ymd);
+  const idx = dt.getUTCDay(); // 0=Sun..6=Sat
+  const map = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  return map[idx];
 }
 
 function nextCollectionDateForDay(routeDay) {
@@ -144,6 +160,16 @@ function nextCollectionDateForDay(routeDay) {
 
   const delta = (targetIdx - todayIdx + 7) % 7; // includes today (0) if same day
   return addDaysYMD(todayYMD, delta);
+}
+
+function nextOccurrencesOfDay(routeDay, count = 6) {
+  const first = nextCollectionDateForDay(routeDay);
+  if (!first) return [];
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(addDaysYMD(first, i * 7));
+  }
+  return out;
 }
 
 async function lookupRouteByPostcode(supabaseAdmin, postcodeStr) {
@@ -175,7 +201,6 @@ async function lookupRouteByPostcode(supabaseAdmin, postcodeStr) {
     }
   }
 
-  // de-dupe
   const seen = new Set();
   const unique = [];
   for (const m of matches) {
@@ -194,10 +219,6 @@ async function lookupRouteByPostcode(supabaseAdmin, postcodeStr) {
     };
   }
 
-  // default selection:
-  // 1) longest prefix
-  // 2) earliest next_date
-  // 3) slot preference (AM, PM, ANY)
   const scored = unique
     .map((m) => ({
       ...m,
@@ -277,6 +298,9 @@ export default async function handler(req, res) {
     const extraBags = clampInt(body.extraBags ?? 0, 0, 10);
     const useOwnBin = Boolean(body.useOwnBin);
 
+    // Optional chosen start date (YYYY-MM-DD) from UI
+    const startDate = body.startDate ? String(body.startDate).trim() : null;
+
     if (!email || !postcodeRaw || !address) {
       return res.status(400).json({ error: "Missing required fields" });
     }
@@ -295,12 +319,11 @@ export default async function handler(req, res) {
     const supabaseAdmin = getSupabaseAdmin();
     if (!supabaseAdmin) {
       return res.status(500).json({
-        error:
-          "Supabase admin is not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing).",
+        error: "Supabase admin is not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing).",
       });
     }
 
-    // ✅ Route assignment from postcode (authoritative)
+    // Route assignment from postcode
     const routeLookup = await lookupRouteByPostcode(supabaseAdmin, postcodeRaw);
 
     if (!routeLookup.in_area || !routeLookup.default) {
@@ -314,21 +337,47 @@ export default async function handler(req, res) {
     const routeDay = routeLookup.default.route_day;
     const routeSlot = routeLookup.default.slot || "ANY";
     const matchedPrefix = routeLookup.default.matched_prefix || "";
-    const nextCollectionDate = routeLookup.default.next_date || nextCollectionDateForDay(routeDay);
 
-    if (!nextCollectionDate) {
+    const nextAvailable = routeLookup.default.next_date || nextCollectionDateForDay(routeDay);
+    if (!nextAvailable) {
       return res.status(500).json({
         error: "Could not calculate next collection date for assigned route.",
         debug: { routeDay, routeArea, routeSlot },
       });
     }
 
-    // ✅ Build Checkout line items
-    // Stripe supports mixing recurring + one-time items in subscription mode.
+    const startOptions = nextOccurrencesOfDay(routeDay, 6);
+
+    // Decide chosen start date:
+    // - if user provided startDate, validate it
+    // - else default to nextAvailable
+    let chosenStart = nextAvailable;
+
+    if (startDate) {
+      if (!isValidYMD(startDate)) {
+        return res.status(400).json({ error: "Invalid startDate format (expected YYYY-MM-DD)." });
+      }
+      const wd = weekdayNameOfYMD(startDate);
+      if (wd !== routeDay) {
+        return res.status(400).json({
+          error: "startDate does not match the route day.",
+          debug: { startDate, startDateWeekday: wd, routeDay },
+        });
+      }
+      if (startDate < nextAvailable) {
+        return res.status(400).json({
+          error: "startDate must be on/after the next available collection date.",
+          debug: { startDate, nextAvailable },
+        });
+      }
+      chosenStart = startDate;
+    }
+
+    // Checkout line items
     const line_items = [{ price: prices.bin, quantity: 1 }];
     if (extraBags > 0) line_items.push({ price: prices.bag, quantity: extraBags });
 
-    // ✅ Deposit as one-time line item (only if NOT using own bin)
+    // Deposit as one-time line item (only if NOT using own bin)
     const depositApplied = !useOwnBin;
     if (depositApplied) {
       line_items.push({ price: depositPriceId, quantity: 1 });
@@ -356,7 +405,9 @@ export default async function handler(req, res) {
         phone,
         postcode: routeLookup.postcode || postcodeRaw,
         address,
-        nextCollectionDate,
+
+        nextCollectionDate: chosenStart, // what we will schedule as first collection
+        chosenStartDate: chosenStart,
       },
 
       success_url: `${origin}/subscription-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -383,8 +434,8 @@ export default async function handler(req, res) {
           extra_bags: extraBags,
           use_own_bin: useOwnBin,
 
-          next_collection_date: nextCollectionDate,
-          anchor_date: nextCollectionDate,
+          next_collection_date: chosenStart,
+          anchor_date: chosenStart,
 
           payload: {
             frequency,
@@ -395,7 +446,9 @@ export default async function handler(req, res) {
             routeArea,
             routeSlot,
             matchedPrefix,
-            nextCollectionDate,
+            nextAvailable,
+            chosenStartDate: chosenStart,
+            startOptions,
           },
         },
         { onConflict: "stripe_checkout_session_id" }
@@ -406,7 +459,15 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       url: session.url,
-      route: { routeArea, routeDay, routeSlot, nextCollectionDate, matchedPrefix },
+      route: {
+        routeArea,
+        routeDay,
+        routeSlot,
+        matchedPrefix,
+        nextAvailable,
+        chosenStartDate: chosenStart,
+        startOptions,
+      },
     });
   } catch (err) {
     const msg = err?.raw?.message || err?.message || "Subscription checkout failed";
