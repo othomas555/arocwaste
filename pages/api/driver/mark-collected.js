@@ -1,15 +1,9 @@
-import { createClient } from "@supabase/supabase-js";
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
-function getBearer(req) {
+function getBearerToken(req) {
   const h = req.headers.authorization || "";
-  const [t, v] = h.split(" ");
-  if (t !== "Bearer" || !v) return null;
-  return v;
-}
-
-function isYMD(s) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
 }
 
 export default async function handler(req, res) {
@@ -18,80 +12,50 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const token = getBearer(req);
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
+
+  const token = getBearerToken(req);
   if (!token) return res.status(401).json({ error: "Missing bearer token" });
 
-  const body = req.body || {};
-  const run_id = (body.run_id || "").toString().trim();
-  const subscription_id = (body.subscription_id || "").toString().trim();
+  try {
+    const body = req.body || {};
+    const run_id = String(body.run_id || "").trim();
+    const subscription_id = String(body.subscription_id || "").trim();
+    const collected_date = String(body.collected_date || "").trim(); // YYYY-MM-DD
 
-  if (!run_id) return res.status(400).json({ error: "run_id is required" });
-  if (!subscription_id) return res.status(400).json({ error: "subscription_id is required" });
+    if (!run_id || !subscription_id || !collected_date) {
+      return res.status(400).json({ error: "Missing run_id, subscription_id, collected_date" });
+    }
 
-  const url = process.env.SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anon) return res.status(500).json({ error: "Supabase env missing" });
+    // validate session + staff
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
 
-  const authClient = createClient(url, anon, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
-  });
+    const email = String(userData.user.email || "").trim().toLowerCase();
+    const { data: staffRow } = await supabase.from("staff").select("id,active").ilike("email", email).maybeSingle();
+    if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
+    if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
-  const { data: userData, error: userErr } = await authClient.auth.getUser();
-  if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
+    // must be assigned to run
+    const { data: link } = await supabase
+      .from("daily_run_staff")
+      .select("daily_run_id")
+      .eq("daily_run_id", run_id)
+      .eq("staff_id", staffRow.id)
+      .maybeSingle();
 
-  const email = (userData.user.email || "").toLowerCase();
-  if (!email) return res.status(401).json({ error: "User email missing" });
+    if (!link) return res.status(403).json({ error: "Not assigned to this run" });
 
-  const admin = getSupabaseAdmin();
-  if (!admin) return res.status(500).json({ error: "Supabase admin not configured" });
+    // insert collection row (idempotent: use upsert on (subscription_id,collected_date) if you have unique constraint)
+    const { error: eIns } = await supabase
+      .from("subscription_collections")
+      .insert({ subscription_id, collected_date });
 
-  const { data: staff, error: staffErr } = await admin
-    .from("staff")
-    .select("id,active")
-    .ilike("email", email)
-    .maybeSingle();
+    if (eIns) return res.status(500).json({ error: eIns.message });
 
-  if (staffErr) return res.status(500).json({ error: staffErr.message });
-  if (!staff || !staff.active) return res.status(403).json({ error: "Not an active staff member" });
-
-  // confirm staff assigned to run
-  const { data: link, error: linkErr } = await admin
-    .from("daily_run_staff")
-    .select("run_id")
-    .eq("run_id", run_id)
-    .eq("staff_id", staff.id)
-    .maybeSingle();
-
-  if (linkErr) return res.status(500).json({ error: linkErr.message });
-  if (!link) return res.status(403).json({ error: "You are not assigned to this run" });
-
-  // get run_date (we store marker with collected_date)
-  const { data: run, error: runErr } = await admin
-    .from("daily_runs")
-    .select("run_date")
-    .eq("id", run_id)
-    .single();
-
-  if (runErr) return res.status(400).json({ error: runErr.message });
-  if (!isYMD(run.run_date)) return res.status(500).json({ error: "Run date invalid" });
-
-  // idempotent insert: if already exists, do nothing (we'll check first)
-  const { data: existing, error: exErr } = await admin
-    .from("subscription_collections")
-    .select("id")
-    .eq("subscription_id", subscription_id)
-    .eq("collected_date", run.run_date)
-    .maybeSingle();
-
-  if (exErr) return res.status(500).json({ error: exErr.message });
-
-  if (!existing) {
-    const { error: insErr } = await admin.from("subscription_collections").insert([
-      { subscription_id, collected_date: run.run_date },
-    ]);
-    if (insErr) return res.status(400).json({ error: insErr.message });
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Failed to mark collected" });
   }
-
-  return res.status(200).json({ ok: true });
 }
