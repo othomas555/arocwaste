@@ -1,361 +1,191 @@
-import Stripe from "stripe";
+// pages/api/ops/day-summary.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
-const secretKey = process.env.STRIPE_SECRET_KEY;
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-function clampQty(n) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 1;
-  return Math.max(1, Math.min(50, Math.trunc(x)));
+function isValidYMD(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
-function buildItemsSummary(items) {
-  const clean = Array.isArray(items) ? items.filter((x) => x && x.title) : [];
-  if (!clean.length) return "";
-  const first = String(clean[0].title || "Item");
-  if (clean.length === 1) return first;
-  return `${first} + ${clean.length - 1} more`;
+function ymdToWeekdayLondon(ymd) {
+  // Use UTC noon to avoid DST edge weirdness for date-only values
+  const [Y, M, D] = ymd.split("-").map((x) => Number(x));
+  const dt = new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
+  const dow = dt.getUTCDay(); // 0-6
+  return DAY_NAMES[dow] || null;
+}
+
+function normSlot(v) {
+  const s = String(v || "ANY").toUpperCase().trim();
+  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
+}
+
+function slotBucket(v) {
+  const raw = String(v ?? "").trim();
+  if (!raw) return "BLANK";
+  const s = raw.toUpperCase();
+  if (s === "AM") return "AM";
+  if (s === "PM") return "PM";
+  if (s === "ANY") return "ANY";
+  return "OTHER";
+}
+
+function areaKey(area, slot) {
+  return `${String(area || "").trim()}|${normSlot(slot)}`;
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+  // ✅ accept GET and POST so UI can use either without 405
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  if (!secretKey || !secretKey.startsWith("sk_")) {
-    return res.status(500).json({
-      error:
-        "Missing or invalid STRIPE_SECRET_KEY in Vercel Environment Variables (must start with sk_).",
-    });
-  }
-
-  const stripe = new Stripe(secretKey, { apiVersion: "2024-06-20" });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
 
   try {
-    const body = req.body || {};
-    const mode = String(body.mode || "single"); // "single" or "basket"
+    const src = req.method === "GET" ? req.query : (req.body || {});
+    const date = String(src.date || "").trim();
 
-    const email = body.email;
-    const postcode = body.postcode;
-    const address = body.address;
-    const date = body.date;
-
-    const origin = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
-
-    const totalPounds = Number(body.total);
-    if (!Number.isFinite(totalPounds) || totalPounds <= 0) {
-      return res.status(400).json({ error: "Invalid total amount" });
+    if (!isValidYMD(date)) {
+      return res.status(400).json({ error: "Invalid date. Expected YYYY-MM-DD." });
     }
-    const totalPence = Math.round(totalPounds * 100);
 
-    // ---- BASKET MODE ----
-    if (mode === "basket") {
-      const items = Array.isArray(body.items) ? body.items : [];
+    const route_day = ymdToWeekdayLondon(date);
+    if (!route_day) return res.status(400).json({ error: "Could not compute weekday for date" });
 
-      if (!email || !postcode || !address || !date) {
-        return res.status(400).json({ error: "Missing required booking fields" });
+    // 1) route areas active for that weekday
+    const { data: routeAreas, error: eAreas } = await supabase
+      .from("route_areas")
+      .select("id,name,route_day,slot,active,postcode_prefixes")
+      .eq("active", true)
+      .eq("route_day", route_day);
+
+    if (eAreas) return res.status(500).json({ error: eAreas.message });
+
+    // 2) existing runs already created for that date/day
+    const { data: runs, error: eRuns } = await supabase
+      .from("daily_runs")
+      .select("id,run_date,route_day,route_area,route_slot,vehicle_id,notes,created_at")
+      .eq("run_date", date)
+      .eq("route_day", route_day);
+
+    if (eRuns) return res.status(500).json({ error: eRuns.message });
+
+    // 3) subscriptions due that day (for counts)
+    const { data: subsDue, error: eSubs } = await supabase
+      .from("subscriptions")
+      .select("id,route_area,route_slot,next_collection_date,route_day,status")
+      .eq("status", "active")
+      .eq("next_collection_date", date)
+      .eq("route_day", route_day);
+
+    if (eSubs) return res.status(500).json({ error: eSubs.message });
+
+    // 4) bookings due that day (for counts)
+    // NOTE: requires bookings.service_date + route_day/route_area populated
+    const { data: bookingsDue, error: eBookings } = await supabase
+      .from("bookings")
+      .select("id,route_area,route_slot,service_date,status,completed_at")
+      .eq("service_date", date)
+      .eq("route_day", route_day)
+      .not("status", "in", "(cancelled)");
+
+    // If bookings table doesn't have these columns yet, show a warning instead of failing the whole day page.
+    let bookingsWarning = "";
+    if (eBookings) {
+      bookingsWarning =
+        "Bookings could not be counted (schema mismatch). Ensure bookings has service_date, route_day, route_area, route_slot, status.";
+    }
+
+    // Build area+slot list from route_areas (this is what ops sees/plans by)
+    const areaSlotRows = (routeAreas || []).map((r) => ({
+      route_area_id: r.id,
+      route_area: r.name,
+      route_day: r.route_day,
+      route_slot: normSlot(r.slot || "ANY"),
+      postcode_prefix_count: Array.isArray(r.postcode_prefixes) ? r.postcode_prefixes.length : 0,
+    }));
+
+    // Aggregate counts per area+slot
+    const counts = new Map(); // key -> { subsTotal, bookingsTotal, completedBookings }
+    function bump(mapKey, field, inc = 1) {
+      if (!counts.has(mapKey)) counts.set(mapKey, { subsTotal: 0, bookingsTotal: 0, completedBookings: 0 });
+      const obj = counts.get(mapKey);
+      obj[field] += inc;
+    }
+
+    for (const s of subsDue || []) {
+      const k = areaKey(s.route_area, s.route_slot);
+      bump(k, "subsTotal", 1);
+    }
+
+    if (!eBookings) {
+      for (const b of bookingsDue || []) {
+        const k = areaKey(b.route_area, b.route_slot);
+        bump(k, "bookingsTotal", 1);
+        const done = String(b.status || "").toLowerCase() === "completed" || !!b.completed_at;
+        if (done) bump(k, "completedBookings", 1);
       }
-      if (!items.length) {
-        return res.status(400).json({ error: "Basket is empty" });
-      }
+    }
 
-      const cleanItems = items
-        .filter((x) => x && x.title)
-        .map((x) => ({
-          id: String(x.id || ""),
-          category: String(x.category || ""),
-          slug: String(x.slug || ""),
-          title: String(x.title || ""),
-          unitPrice: Number(x.unitPrice || 0),
-          qty: clampQty(x.qty),
-        }))
-        .filter((x) => x.qty >= 1);
+    // Attach counts + existing runs to each area+slot row
+    const outRows = areaSlotRows
+      .map((r) => {
+        const k = areaKey(r.route_area, r.route_slot);
+        const c = counts.get(k) || { subsTotal: 0, bookingsTotal: 0, completedBookings: 0 };
 
-      if (!cleanItems.length) {
-        return res.status(400).json({ error: "Basket is empty" });
-      }
+        const existingRuns = (runs || []).filter(
+          (x) =>
+            String(x.route_area || "").trim() === String(r.route_area || "").trim() &&
+            normSlot(x.route_slot) === normSlot(r.route_slot)
+        );
 
-      const timeAdd = Number(body.timeAdd ?? 0);
-      const removeAdd = Number(body.removeAdd ?? 0);
-
-      const lineItems = [];
-
-      for (const it of cleanItems) {
-        const unitPence = Math.round((Number(it.unitPrice) || 0) * 100);
-        if (unitPence <= 0) continue;
-
-        lineItems.push({
-          quantity: it.qty,
-          price_data: {
-            currency: "gbp",
-            unit_amount: unitPence,
-            product_data: {
-              name: `AROC Waste – ${it.title}`,
-              description: it.category ? `Category: ${it.category}` : undefined,
-            },
-          },
-        });
-      }
-
-      if (Number.isFinite(timeAdd) && timeAdd > 0) {
-        lineItems.push({
-          quantity: 1,
-          price_data: {
-            currency: "gbp",
-            unit_amount: Math.round(timeAdd * 100),
-            product_data: { name: "Time option" },
-          },
-        });
-      }
-
-      if (Number.isFinite(removeAdd) && removeAdd > 0) {
-        lineItems.push({
-          quantity: 1,
-          price_data: {
-            currency: "gbp",
-            unit_amount: Math.round(removeAdd * 100),
-            product_data: { name: "Remove from property" },
-          },
-        });
-      }
-
-      // Ensure Stripe total matches UI total (small adjustment only)
-      const computedPence = lineItems.reduce((sum, li) => {
-        const qty = Number(li.quantity) || 0;
-        const amt = Number(li.price_data?.unit_amount) || 0;
-        return sum + qty * amt;
-      }, 0);
-
-      const diff = totalPence - computedPence;
-      if (diff !== 0) {
-        if (Math.abs(diff) > 500) {
-          return res.status(400).json({
-            error:
-              "Price mismatch between basket items and total. Please refresh and try again.",
-          });
-        }
-
-        lineItems.push({
-          quantity: 1,
-          price_data: {
-            currency: "gbp",
-            unit_amount: diff,
-            product_data: {
-              name: "Order adjustment",
-              description: "Auto-adjust to match checkout total",
-            },
-          },
-        });
-      }
-
-      const itemsSummary = buildItemsSummary(cleanItems);
-
-      const session = await stripe.checkout.sessions.create({
-        mode: "payment",
-        payment_method_types: ["card"],
-        customer_email: email,
-        line_items: lineItems,
-
-        // ✅ Keep metadata small (<= 500 chars each)
-        metadata: {
-          mode: "basket",
-          item_count: String(cleanItems.length),
-          items_summary: itemsSummary, // short summary only
-          time: String(body.time ?? ""),
-          timeAdd: String(body.timeAdd ?? ""),
-          remove: String(body.remove ?? ""),
-          removeAdd: String(body.removeAdd ?? ""),
-          date: String(body.date ?? ""),
-          routeDay: String(body.routeDay ?? ""),
-          routeArea: String(body.routeArea ?? ""),
-          name: String(body.name ?? ""),
-          phone: String(body.phone ?? ""),
-          postcode: String(body.postcode ?? ""),
-          address: String(body.address ?? ""),
-          notes: String(body.notes ?? ""),
-          total: String(body.total ?? ""),
-        },
-
-        success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}/cancel`,
+        return {
+          ...r,
+          counts: c,
+          existing_runs: existingRuns,
+        };
+      })
+      .sort((a, b) => {
+        const n = String(a.route_area || "").localeCompare(String(b.route_area || ""));
+        if (n !== 0) return n;
+        return String(a.route_slot || "").localeCompare(String(b.route_slot || ""));
       });
 
-      // Supabase upsert (best effort) — ✅ full items stored here
-      try {
-        const supabaseAdmin = getSupabaseAdmin();
-
-        if (supabaseAdmin) {
-          const payload = {
-            mode: "basket",
-            items: cleanItems,
-            time: String(body.time ?? ""),
-            timeAdd: Number(body.timeAdd ?? 0),
-            remove: String(body.remove ?? ""),
-            removeAdd: Number(body.removeAdd ?? 0),
-            date: String(body.date ?? ""),
-            routeDay: String(body.routeDay ?? ""),
-            routeArea: String(body.routeArea ?? ""),
-            name: String(body.name ?? ""),
-            phone: String(body.phone ?? ""),
-            postcode: String(body.postcode ?? ""),
-            address: String(body.address ?? ""),
-            notes: String(body.notes ?? ""),
-            total: Number(body.total ?? 0),
-          };
-
-          const { error: upsertErr } = await supabaseAdmin
-            .from("bookings")
-            .upsert(
-              {
-                stripe_session_id: session.id,
-                payment_status: "pending",
-                title: "Basket order",
-                collection_date: String(body.date ?? ""),
-                name: String(body.name ?? ""),
-                email: String(body.email ?? ""),
-                phone: String(body.phone ?? ""),
-                postcode: String(body.postcode ?? ""),
-                address: String(body.address ?? ""),
-                notes: String(body.notes ?? ""),
-                route_day: String(body.routeDay ?? ""),
-                route_area: String(body.routeArea ?? ""),
-                total_pence: totalPence,
-                payload,
-              },
-              { onConflict: "stripe_session_id" }
-            );
-
-          if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
-        } else {
-          console.warn(
-            "Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save."
-          );
-        }
-      } catch (e) {
-        console.error("Supabase save failed:", e?.message || e);
-      }
-
-      return res.status(200).json({ url: session.url });
+    // Helpful warnings for “why don’t jobs show”
+    let warning = "";
+    const noAreas = outRows.length === 0;
+    if (noAreas) {
+      warning = `No active route areas found for ${route_day}.`;
+    } else if ((subsDue || []).length === 0) {
+      warning =
+        `No subscriptions due on ${date}. If you expected one, check that their next_collection_date is ${date} and status=active.`;
     }
 
-    // ---- SINGLE MODE (existing behaviour) ----
-    const title = body.title;
+    const response = {
+      ok: true,
+      date,
+      route_day,
 
-    const qtyRaw = Number(body.qty ?? 1);
-    const qty = Number.isInteger(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+      // keys your UI might be using (be generous for compatibility)
+      areas: outRows,
+      routes: outRows,
+      data: outRows,
 
-    if (!title || !email || !postcode || !address || !date) {
-      return res.status(400).json({ error: "Missing required booking fields" });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      customer_email: email,
-
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "gbp",
-            unit_amount: totalPence,
-            product_data: {
-              name: `AROC Waste – ${title} (x${qty})`,
-              description: `Collection on ${date}`,
-            },
-          },
-        },
-      ],
-
-      metadata: {
-        mode: "single",
-        title: String(body.title ?? ""),
-        qty: String(qty),
-        base: String(body.base ?? ""),
-        time: String(body.time ?? ""),
-        timeAdd: String(body.timeAdd ?? ""),
-        remove: String(body.remove ?? ""),
-        removeAdd: String(body.removeAdd ?? ""),
-        date: String(body.date ?? ""),
-        routeDay: String(body.routeDay ?? ""),
-        routeArea: String(body.routeArea ?? ""),
-        name: String(body.name ?? ""),
-        phone: String(body.phone ?? ""),
-        postcode: String(body.postcode ?? ""),
-        address: String(body.address ?? ""),
-        notes: String(body.notes ?? ""),
-        total: String(body.total ?? ""),
+      runs: runs || [],
+      totals: {
+        areas: outRows.length,
+        subscriptions_due: (subsDue || []).length,
+        bookings_due: eBookings ? null : (bookingsDue || []).length,
       },
 
-      success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/cancel`,
-    });
+      warning: [warning, bookingsWarning].filter(Boolean).join(" ").trim() || "",
+    };
 
-    // Supabase upsert (best effort)
-    try {
-      const supabaseAdmin = getSupabaseAdmin();
-
-      if (supabaseAdmin) {
-        const payload = {
-          mode: "single",
-          title: String(body.title ?? ""),
-          qty,
-          base: Number(body.base ?? 0),
-          time: String(body.time ?? ""),
-          timeAdd: Number(body.timeAdd ?? 0),
-          remove: String(body.remove ?? ""),
-          removeAdd: Number(body.removeAdd ?? 0),
-          date: String(body.date ?? ""),
-          routeDay: String(body.routeDay ?? ""),
-          routeArea: String(body.routeArea ?? ""),
-          name: String(body.name ?? ""),
-          phone: String(body.phone ?? ""),
-          postcode: String(body.postcode ?? ""),
-          address: String(body.address ?? ""),
-          notes: String(body.notes ?? ""),
-          total: Number(body.total ?? 0),
-        };
-
-        const { error: upsertErr } = await supabaseAdmin
-          .from("bookings")
-          .upsert(
-            {
-              stripe_session_id: session.id,
-              payment_status: "pending",
-              title: String(body.title ?? ""),
-              collection_date: String(body.date ?? ""),
-              name: String(body.name ?? ""),
-              email: String(body.email ?? ""),
-              phone: String(body.phone ?? ""),
-              postcode: String(body.postcode ?? ""),
-              address: String(body.address ?? ""),
-              notes: String(body.notes ?? ""),
-              route_day: String(body.routeDay ?? ""),
-              route_area: String(body.routeArea ?? ""),
-              total_pence: totalPence,
-              payload,
-            },
-            { onConflict: "stripe_session_id" }
-          );
-
-        if (upsertErr) console.error("Supabase upsert error:", upsertErr.message);
-      } else {
-        console.warn(
-          "Supabase not configured (SUPABASE_URL / SERVICE_ROLE missing). Skipping DB save."
-        );
-      }
-    } catch (e) {
-      console.error("Supabase save failed:", e?.message || e);
-    }
-
-    return res.status(200).json({ url: session.url });
-  } catch (err) {
-    const msg =
-      err?.raw?.message ||
-      err?.message ||
-      "Stripe session creation failed (unknown error)";
-    console.error("Stripe error:", msg);
-    return res.status(500).json({ error: msg });
+    return res.status(200).json(response);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Failed to load day summary" });
   }
 }
