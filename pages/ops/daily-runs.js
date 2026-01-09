@@ -1,12 +1,12 @@
 // pages/ops/daily-runs.js
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 
-const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const SLOTS = ["ANY", "AM", "PM"];
 
-function cx(...classes) {
-  return classes.filter(Boolean).join(" ");
+function cx(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
 function londonTodayYMD() {
@@ -16,266 +16,268 @@ function londonTodayYMD() {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(new Date());
+
   const y = parts.find((p) => p.type === "year")?.value;
   const m = parts.find((p) => p.type === "month")?.value;
   const d = parts.find((p) => p.type === "day")?.value;
   return `${y}-${m}-${d}`;
 }
 
-export default function OpsDailyRunsPage() {
-  const [date, setDate] = useState(londonTodayYMD());
+async function apiJSON(url, opts) {
+  const res = await fetch(url, opts);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error || "Request failed");
+  return json;
+}
 
-  const [runs, setRuns] = useState([]);
-  const [staff, setStaff] = useState([]);
-  const [vehicles, setVehicles] = useState([]);
+function uniq(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr) {
+    const k = String(x || "");
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+export default function OpsDailyRuns({ initialRuns, initialRouteAreas }) {
+  const [runs, setRuns] = useState(initialRuns || []);
+  const [routeAreas, setRouteAreas] = useState(initialRouteAreas || []);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const [createForm, setCreateForm] = useState({
-    run_date: londonTodayYMD(),
-    route_day: "Monday",
-    route_area: "",
-    route_slot: "ANY",
-    vehicle_id: "",
-    notes: "",
-    staff_ids: [],
-  });
+  // Form state
+  const [runDate, setRunDate] = useState(londonTodayYMD());
+  const [routeDay, setRouteDay] = useState("Monday");
+  const [routeArea, setRouteArea] = useState("");
+  const [routeSlot, setRouteSlot] = useState("ANY");
 
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [edit, setEdit] = useState({
-    id: "",
-    run_date: "",
-    route_day: "",
-    route_area: "",
-    route_slot: "ANY",
-    vehicle_id: "",
-    notes: "",
-    staff_ids: [],
-  });
+  const areasForDay = useMemo(() => {
+    // Build list of unique area names available for selected day
+    const filtered = (routeAreas || []).filter(
+      (r) => (r.active !== false) && r.route_day === routeDay
+    );
+    const names = uniq(filtered.map((r) => r.name)).sort((a, b) => a.localeCompare(b));
+    return names;
+  }, [routeAreas, routeDay]);
 
-  async function loadAll(forDate) {
-    setLoading(true);
+  const slotsForSelectedAreaDay = useMemo(() => {
+    // For clarity: show which slots exist in route_areas for (day + area)
+    const filtered = (routeAreas || []).filter(
+      (r) =>
+        (r.active !== false) &&
+        r.route_day === routeDay &&
+        r.name === routeArea
+    );
+    const slots = uniq(filtered.map((r) => (r.slot || "ANY"))).sort((a, b) => {
+      const ai = SLOTS.indexOf(a);
+      const bi = SLOTS.indexOf(b);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+    return slots.length ? slots : ["ANY"];
+  }, [routeAreas, routeDay, routeArea]);
+
+  // When day changes, reset area to first available
+  useMemo(() => {
+    if (!areasForDay.length) {
+      setRouteArea("");
+      return;
+    }
+    if (!routeArea || !areasForDay.includes(routeArea)) {
+      setRouteArea(areasForDay[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeDay, areasForDay.join("|")]);
+
+  // When area changes, nudge slot to a valid one for that area/day
+  useMemo(() => {
+    if (!routeArea) return;
+    if (!slotsForSelectedAreaDay.includes(routeSlot)) {
+      setRouteSlot(slotsForSelectedAreaDay[0] || "ANY");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeArea, routeDay, slotsForSelectedAreaDay.join("|")]);
+
+  const runsSorted = useMemo(() => {
+    const copy = [...(runs || [])];
+    copy.sort((a, b) => {
+      const ad = String(a.run_date || "").localeCompare(String(b.run_date || ""));
+      if (ad !== 0) return ad;
+      const day = String(a.route_day || "").localeCompare(String(b.route_day || ""));
+      if (day !== 0) return day;
+      const area = String(a.route_area || "").localeCompare(String(b.route_area || ""));
+      if (area !== 0) return area;
+      return String(a.route_slot || "").localeCompare(String(b.route_slot || ""));
+    });
+    return copy;
+  }, [runs]);
+
+  async function refresh() {
     setError("");
+    setBusy(true);
     try {
-      const [rRuns, rStaff, rVehicles] = await Promise.all([
-        fetch(`/api/ops/daily-runs?date=${encodeURIComponent(forDate)}`),
-        fetch("/api/ops/staff"),
-        fetch("/api/ops/vehicles"),
+      const [r1, r2] = await Promise.all([
+        apiJSON("/api/ops/daily-runs"),
+        apiJSON("/api/ops/route-areas"),
       ]);
-
-      const jRuns = await rRuns.json();
-      const jStaff = await rStaff.json();
-      const jVehicles = await rVehicles.json();
-
-      if (!rRuns.ok) throw new Error(jRuns?.error || "Failed loading runs");
-      if (!rStaff.ok) throw new Error(jStaff?.error || "Failed loading staff");
-      if (!rVehicles.ok) throw new Error(jVehicles?.error || "Failed loading vehicles");
-
-      setRuns(Array.isArray(jRuns?.runs) ? jRuns.runs : []);
-      setStaff(Array.isArray(jStaff?.staff) ? jStaff.staff : []);
-      setVehicles(Array.isArray(jVehicles?.vehicles) ? jVehicles.vehicles : []);
-
-      setCreateForm((s) => ({ ...s, run_date: forDate }));
+      setRuns(r1.data || []);
+      setRouteAreas(r2.data || []);
     } catch (e) {
-      setError(e.message || "Load failed");
+      setError(e?.message || "Refresh failed");
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   }
 
-  useEffect(() => {
-    loadAll(date);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date]);
-
-  const activeStaff = useMemo(() => staff.filter((s) => s.active), [staff]);
-  const activeVehicles = useMemo(() => vehicles.filter((v) => v.active), [vehicles]);
-
-  async function createRun() {
-    setSaving(true);
+  async function createRunSingle() {
     setError("");
+
+    if (!runDate) return setError("Pick a run date.");
+    if (!ALL_DAYS.includes(routeDay)) return setError("Pick a valid route day.");
+    if (!routeArea) return setError("Pick a route area (from the dropdown).");
+    if (!SLOTS.includes(routeSlot)) return setError("Pick a valid slot.");
+
+    setBusy(true);
     try {
-      const route_area = (createForm.route_area || "").toString().trim();
-      const route_slot = (createForm.route_slot || "ANY").toString().toUpperCase();
-      const route_day = (createForm.route_day || "").toString();
-
-      const payload = {
-        run_date: date,
-        route_day,
-        route_area,
-        route_slot: SLOTS.includes(route_slot) ? route_slot : "ANY",
-        vehicle_id: createForm.vehicle_id || null,
-        notes: createForm.notes || "",
-        staff_ids: Array.isArray(createForm.staff_ids) ? createForm.staff_ids : [],
-      };
-
-      if (!payload.route_area) throw new Error("Route area is required");
-
-      const res = await fetch("/api/ops/daily-runs", {
+      await apiJSON("/api/ops/daily-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          run_date: runDate,
+          route_day: routeDay,
+          route_area: routeArea,
+          route_slot: routeSlot,
+        }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "Create failed");
 
-      setCreateForm((s) => ({
-        ...s,
-        route_area: "",
-        route_slot: "ANY",
-        vehicle_id: "",
-        notes: "",
-        staff_ids: [],
-      }));
-      await loadAll(date);
+      await refresh();
     } catch (e) {
-      setError(e.message || "Create failed");
+      setError(e?.message || "Create failed.");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
-  function openEdit(run) {
-    const staff_ids = Array.isArray(run.daily_run_staff)
-      ? run.daily_run_staff.map((x) => x.staff?.id).filter(Boolean)
-      : [];
-
-    setEdit({
-      id: run.id,
-      run_date: run.run_date,
-      route_day: run.route_day,
-      route_area: run.route_area,
-      route_slot: (run.route_slot || "ANY").toString().toUpperCase(),
-      vehicle_id: run.vehicle_id || "",
-      notes: run.notes || "",
-      staff_ids,
-    });
-    setDrawerOpen(true);
-  }
-
-  async function saveEdit() {
-    if (!edit.id) return;
-    setSaving(true);
+  async function createRunsForDay() {
+    // Create one run per distinct (area + slot) for selected day, based on route_areas.
     setError("");
-    try {
-      const route_area = (edit.route_area || "").toString().trim();
-      const route_slot = (edit.route_slot || "ANY").toString().toUpperCase();
 
-      const payload = {
-        run_date: edit.run_date,
-        route_day: edit.route_day,
-        route_area,
-        route_slot: SLOTS.includes(route_slot) ? route_slot : "ANY",
-        vehicle_id: edit.vehicle_id || null,
-        notes: edit.notes || "",
-        staff_ids: Array.isArray(edit.staff_ids) ? edit.staff_ids : [],
-      };
-      if (!payload.route_area) throw new Error("Route area is required");
+    if (!runDate) return setError("Pick a run date.");
+    if (!ALL_DAYS.includes(routeDay)) return setError("Pick a valid route day.");
 
-      const res = await fetch(`/api/ops/daily-runs/${edit.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "Save failed");
+    const entries = (routeAreas || []).filter(
+      (r) => (r.active !== false) && r.route_day === routeDay && r.name
+    );
 
-      setDrawerOpen(false);
-      await loadAll(date);
-    } catch (e) {
-      setError(e.message || "Save failed");
-    } finally {
-      setSaving(false);
+    if (!entries.length) {
+      return setError(`No active route areas exist for ${routeDay}. Add them in /ops/routes first.`);
     }
-  }
 
-  async function deleteRun(id) {
-    const ok = window.confirm("Delete this run? This cannot be undone.");
-    if (!ok) return;
-
-    setSaving(true);
-    setError("");
-    try {
-      const res = await fetch(`/api/ops/daily-runs/${id}`, { method: "DELETE" });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "Delete failed");
-      setDrawerOpen(false);
-      await loadAll(date);
-    } catch (e) {
-      setError(e.message || "Delete failed");
-    } finally {
-      setSaving(false);
+    // Unique combos
+    const combos = [];
+    const seen = new Set();
+    for (const r of entries) {
+      const area = String(r.name || "").trim();
+      const slot = (r.slot || "ANY").toString().trim() || "ANY";
+      const key = `${area}|${slot}`;
+      if (!area || seen.has(key)) continue;
+      seen.add(key);
+      combos.push({ area, slot });
     }
-  }
 
-  function toggleStaff(list, staffId) {
-    const set = new Set(list);
-    if (set.has(staffId)) set.delete(staffId);
-    else set.add(staffId);
-    return Array.from(set);
+    setBusy(true);
+    try {
+      for (const c of combos) {
+        await apiJSON("/api/ops/daily-runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            run_date: runDate,
+            route_day: routeDay,
+            route_area: c.area,
+            route_slot: c.slot,
+          }),
+        });
+      }
+      await refresh();
+    } catch (e) {
+      setError(e?.message || "Bulk create failed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-5xl px-3 py-4">
-        <div className="mb-4 flex items-start justify-between gap-3">
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-6xl px-4 py-6">
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-slate-900">Ops • Daily Runs</h1>
-            <p className="text-sm text-slate-600">
-              Define vans/crews by date + area + vehicle + staff + slot (AM/PM/ANY).
+            <h1 className="text-2xl font-semibold text-gray-900">Daily runs</h1>
+            <p className="text-sm text-gray-600">
+              A <span className="font-semibold">run</span> is one van route for a specific date + area (+ slot).
+              If you have two vans on Monday (e.g. Porthcawl + Swansea), that’s{" "}
+              <span className="font-semibold">two runs</span>.
             </p>
           </div>
 
-          <div className="flex gap-2">
-            <Link href="/ops/dashboard" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Dashboard
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/ops/dashboard"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
+              Back to dashboard
             </Link>
-            <Link href="/ops/staff" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Staff
-            </Link>
-            <Link href="/ops/vehicles" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              Vehicles
-            </Link>
+
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={busy}
+              className={cx(
+                "rounded-lg border px-3 py-2 text-sm font-medium",
+                busy
+                  ? "border-gray-200 bg-gray-100 text-gray-500"
+                  : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50"
+              )}
+            >
+              {busy ? "Working…" : "Refresh"}
+            </button>
           </div>
         </div>
 
         {error ? (
-          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            {error}
+          </div>
         ) : null}
 
-        <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <div className="flex flex-wrap items-end gap-3">
+        {/* Create run */}
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-2 text-sm font-semibold text-gray-900">Create run</div>
+          <div className="text-xs text-gray-600 mb-4">
+            Route areas come from <span className="font-mono">route_areas</span> (set in /ops/routes). No typing.
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
-              <label className="text-xs font-semibold text-slate-600">Date</label>
+              <label className="block text-xs font-semibold text-gray-700">Run date</label>
               <input
                 type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="mt-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                value={runDate}
+                onChange={(e) => setRunDate(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
               />
             </div>
 
-            <div className="ml-auto text-sm text-slate-600">
-              {loading ? "Loading…" : `${runs.length} run(s) for this date`}
-            </div>
-          </div>
-        </div>
-
-        {/* Create run */}
-        <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <div className="mb-3 text-sm font-semibold text-slate-900">Create run</div>
-
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
             <div>
-              <label className="text-xs font-semibold text-slate-600">Route day</label>
+              <label className="block text-xs font-semibold text-gray-700">Route day</label>
               <select
-                value={createForm.route_day}
-                onChange={(e) => setCreateForm((s) => ({ ...s, route_day: e.target.value }))}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                value={routeDay}
+                onChange={(e) => setRouteDay(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
               >
-                {DAYS.map((d) => (
+                {ALL_DAYS.map((d) => (
                   <option key={d} value={d}>
                     {d}
                   </option>
@@ -284,317 +286,187 @@ export default function OpsDailyRunsPage() {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-600">Route area</label>
-              <input
-                value={createForm.route_area}
-                onChange={(e) => setCreateForm((s) => ({ ...s, route_area: e.target.value }))}
-                placeholder="e.g. Porthcawl"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              />
+              <label className="block text-xs font-semibold text-gray-700">Route area</label>
+              <select
+                value={routeArea}
+                onChange={(e) => setRouteArea(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+              >
+                {areasForDay.length ? (
+                  areasForDay.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No areas for this day</option>
+                )}
+              </select>
+              {!areasForDay.length ? (
+                <div className="mt-1 text-xs text-amber-700">
+                  No active route areas exist for {routeDay}. Add them in /ops/routes first.
+                </div>
+              ) : null}
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-600">Slot</label>
+              <label className="block text-xs font-semibold text-gray-700">Slot</label>
               <select
-                value={createForm.route_slot}
-                onChange={(e) => setCreateForm((s) => ({ ...s, route_slot: e.target.value }))}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                value={routeSlot}
+                onChange={(e) => setRouteSlot(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
               >
-                {SLOTS.map((s) => (
+                {slotsForSelectedAreaDay.map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>
                 ))}
               </select>
+              {routeArea ? (
+                <div className="mt-1 text-xs text-gray-500">
+                  Slots available for {routeArea} on {routeDay}:{" "}
+                  <span className="font-semibold">{slotsForSelectedAreaDay.join(", ")}</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-xs text-gray-600">
+              Tip: use <span className="font-semibold">“Create runs for this day”</span> to set up all vans for that day
+              based on /ops/routes.
             </div>
 
-            <div>
-              <label className="text-xs font-semibold text-slate-600">Vehicle</label>
-              <select
-                value={createForm.vehicle_id}
-                onChange={(e) => setCreateForm((s) => ({ ...s, vehicle_id: e.target.value }))}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              >
-                <option value="">— none —</option>
-                {activeVehicles.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.registration}
-                    {v.name ? ` • ${v.name}` : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex items-end">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={createRun}
-                disabled={saving}
+                onClick={createRunsForDay}
+                disabled={busy}
                 className={cx(
-                  "w-full rounded-xl px-4 py-2 text-sm font-semibold shadow-sm ring-1",
-                  saving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-black text-white ring-black hover:bg-slate-900"
+                  "rounded-lg border px-3 py-2 text-sm font-semibold",
+                  busy
+                    ? "border-gray-200 bg-gray-100 text-gray-500"
+                    : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50"
                 )}
               >
-                {saving ? "Saving…" : "Create run"}
+                Create runs for {routeDay}
               </button>
-            </div>
 
-            <div className="md:col-span-5">
-              <label className="text-xs font-semibold text-slate-600">Staff on this run</label>
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {activeStaff.map((s) => {
-                  const checked = createForm.staff_ids.includes(s.id);
-                  return (
-                    <label key={s.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() =>
-                          setCreateForm((f) => ({ ...f, staff_ids: toggleStaff(f.staff_ids, s.id) }))
-                        }
-                      />
-                      <span className="font-semibold text-slate-900">{s.name}</span>
-                      <span className="ml-auto text-xs text-slate-500">{s.role}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="md:col-span-5">
-              <label className="text-xs font-semibold text-slate-600">Notes</label>
-              <input
-                value={createForm.notes}
-                onChange={(e) => setCreateForm((s) => ({ ...s, notes: e.target.value }))}
-                placeholder="Optional"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-              />
+              <button
+                type="button"
+                onClick={createRunSingle}
+                disabled={busy || !areasForDay.length}
+                className={cx(
+                  "rounded-lg px-4 py-2 text-sm font-semibold",
+                  busy || !areasForDay.length
+                    ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+                    : "bg-gray-900 text-white hover:bg-black"
+                )}
+              >
+                Create this run
+              </button>
             </div>
           </div>
         </div>
 
         {/* Runs list */}
-        {loading ? (
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="text-sm text-slate-600">Loading runs…</div>
-          </div>
-        ) : runs.length === 0 ? (
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div className="text-sm text-slate-700">No runs for this date yet. Create one above.</div>
-          </div>
-        ) : (
-          <div className="space-y-2 pb-10">
-            {runs.map((r) => {
-              const staffList = Array.isArray(r.daily_run_staff)
-                ? r.daily_run_staff.map((x) => x.staff?.name).filter(Boolean)
-                : [];
-              const vehicleLabel = r.vehicles
-                ? `${r.vehicles.registration}${r.vehicles.name ? ` • ${r.vehicles.name}` : ""}`
-                : "— no vehicle —";
-
-              return (
-                <div
-                  key={r.id}
-                  className="w-full rounded-2xl bg-white p-4 text-left shadow-sm ring-1 ring-slate-200"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-base font-semibold text-slate-900">
-                        {r.route_area} • {r.route_day} • {String(r.route_slot || "ANY").toUpperCase()}
-                      </div>
-                      <div className="mt-1 text-sm text-slate-600">
-                        <span className="font-medium text-slate-700">{vehicleLabel}</span>
-                        <span className="mx-2 text-slate-300">•</span>
-                        <span>{staffList.length ? staffList.join(", ") : "No staff assigned"}</span>
-                      </div>
-                      {r.notes ? <div className="mt-1 text-xs text-slate-500">{r.notes}</div> : null}
-                    </div>
-
-                    <div className="shrink-0 flex gap-2">
-                      <Link
-                        href={`/ops/run/${r.id}`}
-                        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-sm hover:bg-slate-50"
-                      >
-                        Open
-                      </Link>
-                      <button
-                        type="button"
-                        onClick={() => openEdit(r)}
-                        className="rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-900"
-                      >
-                        Edit
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Drawer edit */}
-      {drawerOpen ? (
-        <div className="fixed inset-0 z-50">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/30"
-            onClick={() => setDrawerOpen(false)}
-            aria-label="Close"
-          />
-          <div className="absolute inset-x-0 bottom-0 mx-auto max-w-5xl rounded-t-3xl bg-white p-4 shadow-2xl ring-1 ring-slate-200">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-base font-semibold text-slate-900">Edit run</div>
-                <div className="mt-1 text-sm text-slate-600">{edit.run_date}</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setDrawerOpen(false)}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
-              >
-                Close
-              </button>
+        <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Existing runs</h2>
+              <p className="text-xs text-gray-600">
+                Click a run to view stops and mark collections.
+              </p>
             </div>
+            <div className="text-xs text-gray-500">Runs: {runsSorted.length}</div>
+          </div>
 
-            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Run date</label>
-                <input
-                  type="date"
-                  value={edit.run_date}
-                  onChange={(e) => setEdit((s) => ({ ...s, run_date: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Route day</label>
-                <select
-                  value={edit.route_day}
-                  onChange={(e) => setEdit((s) => ({ ...s, route_day: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                >
-                  {DAYS.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Route area</label>
-                <input
-                  value={edit.route_area}
-                  onChange={(e) => setEdit((s) => ({ ...s, route_area: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Slot</label>
-                <select
-                  value={edit.route_slot}
-                  onChange={(e) => setEdit((s) => ({ ...s, route_slot: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                >
-                  {SLOTS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-600">Vehicle</label>
-                <select
-                  value={edit.vehicle_id}
-                  onChange={(e) => setEdit((s) => ({ ...s, vehicle_id: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                >
-                  <option value="">— none —</option>
-                  {activeVehicles.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.registration}
-                      {v.name ? ` • ${v.name}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-slate-600">Staff on this run</label>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {activeStaff.map((s) => {
-                    const checked = edit.staff_ids.includes(s.id);
-                    return (
-                      <label key={s.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setEdit((f) => ({ ...f, staff_ids: toggleStaff(f.staff_ids, s.id) }))}
-                        />
-                        <span className="font-semibold text-slate-900">{s.name}</span>
-                        <span className="ml-auto text-xs text-slate-500">{s.role}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="md:col-span-2">
-                <label className="text-xs font-semibold text-slate-600">Notes</label>
-                <textarea
-                  rows={3}
-                  value={edit.notes}
-                  onChange={(e) => setEdit((s) => ({ ...s, notes: e.target.value }))}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={saveEdit}
-                disabled={saving}
-                className={cx(
-                  "rounded-xl px-4 py-3 text-sm font-semibold shadow-sm ring-1",
-                  saving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-600">
+                <tr>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Day</th>
+                  <th className="px-3 py-2 text-left">Area</th>
+                  <th className="px-3 py-2 text-left">Slot</th>
+                  <th className="px-3 py-2 text-right">Open</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {runsSorted.length ? (
+                  runsSorted.map((r) => (
+                    <tr key={r.id} className="bg-white">
+                      <td className="px-3 py-2 text-gray-900 font-medium">{r.run_date}</td>
+                      <td className="px-3 py-2 text-gray-700">{r.route_day}</td>
+                      <td className="px-3 py-2 text-gray-700">{r.route_area}</td>
+                      <td className="px-3 py-2 text-gray-700">{r.route_slot || "ANY"}</td>
+                      <td className="px-3 py-2 text-right">
+                        <Link
+                          href={`/ops/run/${r.id}`}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+                        >
+                          Open
+                        </Link>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-8 text-center text-sm text-gray-600" colSpan={5}>
+                      No runs yet. Create one above.
+                    </td>
+                  </tr>
                 )}
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
+              </tbody>
+            </table>
+          </div>
 
-              <button
-                type="button"
-                onClick={() => setDrawerOpen(false)}
-                className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-slate-300 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-
-              <button
-                type="button"
-                onClick={() => deleteRun(edit.id)}
-                disabled={saving}
-                className={cx(
-                  "rounded-xl px-4 py-3 text-sm font-semibold shadow-sm ring-1",
-                  saving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-red-50 text-red-800 ring-red-200 hover:bg-red-100"
-                )}
-              >
-                Delete
-              </button>
-            </div>
-
-            <div className="mt-3 text-xs text-slate-500">
-              Slot matching: Run AM includes subscribers AM + ANY + blank. Run PM includes PM + ANY + blank.
-            </div>
+          <div className="mt-3 text-xs text-gray-500">
+            If a run exists but has no stops, it usually means the run filters don’t match subscriber data
+            (date/area/slot). This UI reduces that risk by selecting areas from /ops/routes.
           </div>
         </div>
-      ) : null}
+      </div>
     </div>
   );
+}
+
+export async function getServerSideProps(ctx) {
+  const proto = (ctx.req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+  const host = ctx.req.headers["x-forwarded-host"] || ctx.req.headers.host;
+  const baseUrl = `${proto}://${host}`;
+
+  try {
+    const [runsRes, routesRes] = await Promise.all([
+      fetch(`${baseUrl}/api/ops/daily-runs`, {
+        headers: {
+          authorization: ctx.req.headers.authorization || "",
+          cookie: ctx.req.headers.cookie || "",
+        },
+      }),
+      fetch(`${baseUrl}/api/ops/route-areas`, {
+        headers: {
+          authorization: ctx.req.headers.authorization || "",
+          cookie: ctx.req.headers.cookie || "",
+        },
+      }),
+    ]);
+
+    const runsJson = await runsRes.json().catch(() => ({}));
+    const routesJson = await routesRes.json().catch(() => ({}));
+
+    return {
+      props: {
+        initialRuns: runsRes.ok ? runsJson.data || [] : [],
+        initialRouteAreas: routesRes.ok ? routesJson.data || [] : [],
+      },
+    };
+  } catch (e) {
+    return {
+      props: {
+        initialRuns: [],
+        initialRouteAreas: [],
+      },
+    };
+  }
 }
