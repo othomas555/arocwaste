@@ -1,15 +1,9 @@
-import { createClient } from "@supabase/supabase-js";
-import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
-function getBearer(req) {
+function getBearerToken(req) {
   const h = req.headers.authorization || "";
-  const [t, v] = h.split(" ");
-  if (t !== "Bearer" || !v) return null;
-  return v;
-}
-
-function isYMD(s) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
 }
 
 export default async function handler(req, res) {
@@ -18,106 +12,63 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { id } = req.query;
-  if (!id || typeof id !== "string") return res.status(400).json({ error: "Missing run id" });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
 
-  const token = getBearer(req);
+  const token = getBearerToken(req);
   if (!token) return res.status(401).json({ error: "Missing bearer token" });
 
-  const url = process.env.SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anon) return res.status(500).json({ error: "Supabase env missing" });
+  try {
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
 
-  // Verify the user via Supabase Auth using their bearer token
-  const authClient = createClient(url, anon, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
-  });
+    const email = String(userData.user.email || "").trim().toLowerCase();
+    if (!email) return res.status(401).json({ error: "No email on session" });
 
-  const { data: userData, error: userErr } = await authClient.auth.getUser();
-  if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
+    const { data: staffRow, error: eStaff } = await supabase
+      .from("staff")
+      .select("id,name,email,role,active")
+      .ilike("email", email)
+      .maybeSingle();
 
-  const email = (userData.user.email || "").toLowerCase();
-  if (!email) return res.status(401).json({ error: "User email missing" });
+    if (eStaff) return res.status(500).json({ error: eStaff.message });
+    if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
+    if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
-  const admin = getSupabaseAdmin();
-  if (!admin) return res.status(500).json({ error: "Supabase admin not configured" });
+    const dateFrom = String(req.query.date_from || "").trim(); // optional YYYY-MM-DD
+    const dateTo = String(req.query.date_to || "").trim(); // optional YYYY-MM-DD
 
-  // Map auth email -> staff row
-  const { data: staff, error: staffErr } = await admin
-    .from("staff")
-    .select("id,name,email,role,active")
-    .ilike("email", email)
-    .maybeSingle();
+    let q = supabase
+      .from("daily_run_staff")
+      .select(
+        `
+        daily_run_id,
+        daily_runs:daily_runs(
+          id, run_date, route_day, route_area, route_slot, vehicle_id, notes, created_at,
+          vehicles:vehicles(id, registration, name)
+        )
+      `
+      )
+      .eq("staff_id", staffRow.id);
 
-  if (staffErr) return res.status(500).json({ error: staffErr.message });
-  if (!staff) return res.status(403).json({ error: "No matching staff record for this email" });
-  if (!staff.active) return res.status(403).json({ error: "Staff record inactive" });
+    // optional date filtering
+    if (dateFrom) q = q.gte("daily_runs.run_date", dateFrom);
+    if (dateTo) q = q.lte("daily_runs.run_date", dateTo);
 
-  // Confirm staff is assigned to this run
-  const { data: link, error: linkErr } = await admin
-    .from("daily_run_staff")
-    .select("run_id")
-    .eq("run_id", id)
-    .eq("staff_id", staff.id)
-    .maybeSingle();
+    const { data: rows, error: eRuns } = await q;
+    if (eRuns) return res.status(500).json({ error: eRuns.message });
 
-  if (linkErr) return res.status(500).json({ error: linkErr.message });
-  if (!link) return res.status(403).json({ error: "You are not assigned to this run" });
+    const runs = (rows || [])
+      .map((r) => r.daily_runs)
+      .filter(Boolean)
+      .sort((a, b) => String(a.run_date || "").localeCompare(String(b.run_date || "")));
 
-  // Load the run
-  const { data: run, error: runErr } = await admin
-    .from("daily_runs")
-    .select(
-      "id,run_date,route_day,route_area,vehicle_id,notes, vehicles(id,registration,name,capacity_units,active), daily_run_staff(staff(id,name,email,role,active))"
-    )
-    .eq("id", id)
-    .single();
-
-  if (runErr) return res.status(400).json({ error: runErr.message });
-
-  const runDate = run.run_date; // YYYY-MM-DD
-  const routeDay = run.route_day;
-  const routeArea = run.route_area;
-
-  if (!isYMD(runDate)) {
-    return res.status(500).json({ error: "Run date invalid" });
+    return res.status(200).json({
+      ok: true,
+      staff: { id: staffRow.id, name: staffRow.name, email: staffRow.email, role: staffRow.role },
+      runs,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Failed to load driver runs" });
   }
-
-  // Stops due for this run
-  const { data: subs, error: subsErr } = await admin
-    .from("subscriptions")
-    .select(
-      "id,status,name,postcode,address,frequency,extra_bags,use_own_bin,route_day,route_area,next_collection_date,ops_notes"
-    )
-    .in("status", ["active", "trialing"])
-    .eq("next_collection_date", runDate)
-    .eq("route_day", routeDay)
-    .eq("route_area", routeArea)
-    .order("postcode", { ascending: true });
-
-  if (subsErr) return res.status(500).json({ error: subsErr.message });
-
-  const ids = (subs || []).map((s) => s.id);
-
-  // Already-collected markers for that date
-  let collectedSet = new Set();
-  if (ids.length) {
-    const { data: cols, error: colErr } = await admin
-      .from("subscription_collections")
-      .select("subscription_id,collected_date")
-      .in("subscription_id", ids)
-      .eq("collected_date", runDate);
-
-    if (colErr) return res.status(500).json({ error: colErr.message });
-    collectedSet = new Set((cols || []).map((c) => c.subscription_id));
-  }
-
-  const stops = (subs || []).map((s) => ({ ...s, collected: collectedSet.has(s.id) }));
-  const totals = {
-    totalStops: stops.length,
-    totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
-  };
-
-  return res.status(200).json({ staff, run, stops, totals });
 }
