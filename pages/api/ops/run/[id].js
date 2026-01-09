@@ -1,242 +1,445 @@
-// pages/api/ops/run/[id].js
-import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
+// pages/ops/run/[id].js
+import { useRouter } from "next/router";
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
-const DAY_INDEX = {
-  Sunday: 0,
-  Monday: 1,
-  Tuesday: 2,
-  Wednesday: 3,
-  Thursday: 4,
-  Friday: 5,
-  Saturday: 6,
-};
-
-function normSlot(v) {
-  const s = String(v || "ANY").toUpperCase().trim();
-  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
+function cx(...classes) {
+  return classes.filter(Boolean).join(" ");
 }
 
-function isValidYMD(s) {
-  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+function fmtGBPFromPence(pence) {
+  const n = Number(pence || 0) / 100;
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n);
 }
 
-function ymdToUTCDate(ymd) {
-  const [Y, M, D] = ymd.split("-").map((n) => Number(n));
-  return new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
-}
+export default function OpsRunViewPage() {
+  const router = useRouter();
+  const { id } = router.query;
 
-function addDaysYMD(ymd, days) {
-  const dt = ymdToUTCDate(ymd);
-  dt.setUTCDate(dt.getUTCDate() + days);
-  const y = dt.getUTCFullYear();
-  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(dt.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
+  const [loading, setLoading] = useState(true);
+  const [savingKey, setSavingKey] = useState("");
+  const [assignSaving, setAssignSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
+  const [run, setRun] = useState(null);
+  const [stops, setStops] = useState([]);
+  const [totals, setTotals] = useState({
+    totalStops: 0,
+    totalExtraBags: 0,
+    totalBookings: 0,
+    totalSubscriptions: 0,
+  });
 
-function weekdayFromYMD(ymd) {
-  const dt = ymdToUTCDate(ymd);
-  const idx = dt.getUTCDay(); // 0-6
-  return Object.keys(DAY_INDEX).find((k) => DAY_INDEX[k] === idx) || null;
-}
+  // assignment options
+  const [vehicles, setVehicles] = useState([]);
+  const [staff, setStaff] = useState([]);
 
-function freqWeeks(frequency) {
-  const f = String(frequency || "").toLowerCase().trim();
-  if (f === "weekly") return 1;
-  if (f === "fortnightly") return 2;
-  if (f === "threeweekly") return 3;
-  return 1;
-}
+  // assignment form
+  const [vehicleId, setVehicleId] = useState("");
+  const [staffIds, setStaffIds] = useState([]);
 
-function nextOnOrAfter(anchorYMD, routeDay) {
-  if (!isValidYMD(anchorYMD)) return null;
-  const aDowName = weekdayFromYMD(anchorYMD);
-  const aDow = DAY_INDEX[aDowName];
-  const tDow = DAY_INDEX[String(routeDay || "").trim()];
-  if (aDow === undefined || tDow === undefined) return null;
+  async function load() {
+    if (!id) return;
+    setLoading(true);
+    setError("");
+    setWarning("");
+    try {
+      const res = await fetch(`/api/ops/run/${id}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to load run");
 
-  const delta = (tDow - aDow + 7) % 7;
-  return addDaysYMD(anchorYMD, delta);
-}
+      setRun(data.run || null);
+      setStops(Array.isArray(data.stops) ? data.stops : []);
+      setTotals(
+        data.totals || { totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalSubscriptions: 0 }
+      );
+      if (data.warning) setWarning(data.warning);
 
-function daysBetweenYMD(a, b) {
-  const da = ymdToUTCDate(a);
-  const db = ymdToUTCDate(b);
-  const ms = db.getTime() - da.getTime();
-  return Math.round(ms / (24 * 60 * 60 * 1000));
-}
+      // sync assignment form from run
+      const vId = data.run?.vehicle_id ? String(data.run.vehicle_id) : "";
+      setVehicleId(vId);
 
-function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
-  if (!isValidYMD(runDate) || !isValidYMD(anchorDate)) return { due: false, reason: "missing_anchor" };
-
-  // Align anchor to route day (repairs “anchor is Friday but route_day is Monday”)
-  const effectiveAnchor = nextOnOrAfter(anchorDate, routeDay);
-  if (!effectiveAnchor) return { due: false, reason: "bad_dates" };
-
-  const diffDays = daysBetweenYMD(effectiveAnchor, runDate);
-  if (diffDays < 0) return { due: false, reason: "before_anchor" };
-
-  const periodDays = freqWeeks(frequency) * 7;
-  return { due: diffDays % periodDays === 0, reason: diffDays % periodDays === 0 ? "due" : "not_due" };
-}
-
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ error: "Method not allowed" });
+      const assigned = Array.isArray(data.run?.daily_run_staff)
+        ? data.run.daily_run_staff.map((x) => x.staff_id).filter(Boolean)
+        : [];
+      setStaffIds(assigned);
+    } catch (e) {
+      setError(e.message || "Load failed");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const supabase = getSupabaseAdmin();
-  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
-
-  const id = String(req.query.id || "");
-  if (!id) return res.status(400).json({ error: "Missing id" });
-
-  try {
-    const { data: run, error: eRun } = await supabase
-      .from("daily_runs")
-      .select(
-        `
-        id, run_date, route_day, route_area, route_slot, vehicle_id, notes,
-        vehicles:vehicles(id, registration, name),
-        daily_run_staff:daily_run_staff(
-          staff_id,
-          staff:staff(id, name, role, active)
-        )
-      `
-      )
-      .eq("id", id)
-      .maybeSingle();
-
-    if (eRun) return res.status(500).json({ error: eRun.message });
-    if (!run) return res.status(404).json({ error: "Run not found" });
-
-    if (!isValidYMD(run.run_date)) {
-      return res.status(500).json({ error: "Run has invalid run_date" });
+  async function loadAssignOptions() {
+    try {
+      const [vRes, sRes] = await Promise.all([fetch("/api/ops/vehicles"), fetch("/api/ops/staff")]);
+      const vJson = await vRes.json().catch(() => ({}));
+      const sJson = await sRes.json().catch(() => ({}));
+      if (vRes.ok) setVehicles(Array.isArray(vJson.data) ? vJson.data : []);
+      if (sRes.ok) setStaff(Array.isArray(sJson.data) ? sJson.data : []);
+    } catch {
+      // ignore — assignment still works if options fail, but dropdowns may be empty
     }
+  }
 
-    const runSlot = normSlot(run.route_slot);
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
-    // Pull ALL active subs for that area/day, then compute due deterministically in JS
-    let subsQ = supabase
-      .from("subscriptions")
-      .select(
-        "id,address,postcode,extra_bags,use_own_bin,route_slot,ops_notes,route_day,route_area,status,frequency,anchor_date"
-      )
-      .eq("status", "active")
-      .eq("route_day", run.route_day)
-      .eq("route_area", run.route_area);
+  useEffect(() => {
+    loadAssignOptions();
+  }, []);
 
-    if (runSlot !== "ANY") {
-      subsQ = subsQ.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
-    }
+  const staffNames = useMemo(() => {
+    if (!run?.daily_run_staff) return "";
+    const names = run.daily_run_staff.map((x) => x.staff?.name).filter(Boolean);
+    return names.join(", ");
+  }, [run]);
 
-    const { data: subsRaw, error: eSubs } = await subsQ
-      .order("postcode", { ascending: true })
-      .order("address", { ascending: true });
+  const vehicleLabel = useMemo(() => {
+    if (!run?.vehicles) return "— no vehicle —";
+    const v = run.vehicles;
+    return `${v.registration}${v.name ? ` • ${v.name}` : ""}`;
+  }, [run]);
 
-    if (eSubs) return res.status(500).json({ error: eSubs.message });
+  const slotLabel = useMemo(() => String(run?.route_slot || "ANY").toUpperCase(), [run]);
 
-    const subsDue = [];
-    let missingAnchor = 0;
+  function toggleStaff(id) {
+    setStaffIds((prev) => {
+      const s = new Set(prev || []);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
+      return Array.from(s);
+    });
+  }
 
-    for (const s of subsRaw || []) {
-      const anchor = s.anchor_date ? String(s.anchor_date).slice(0, 10) : "";
-      const check = isDueOnDate({
-        runDate: run.run_date,
-        routeDay: s.route_day,
-        anchorDate: anchor,
-        frequency: s.frequency,
+  async function saveAssignment() {
+    if (!run?.id) return;
+    setAssignSaving(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/ops/run/${run.id}/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vehicle_id: vehicleId || null,
+          staff_ids: staffIds || [],
+        }),
       });
-
-      if (check.reason === "missing_anchor") missingAnchor++;
-      if (check.due) subsDue.push(s);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || "Failed to save assignment");
+      await load();
+    } catch (e) {
+      setError(e.message || "Failed to save assignment");
+    } finally {
+      setAssignSaving(false);
     }
-
-    // collected map for subs due
-    const subscriptionIds = subsDue.map((s) => s.id);
-    let collectedMap = new Map();
-    if (subscriptionIds.length) {
-      const { data: cols, error: eCols } = await supabase
-        .from("subscription_collections")
-        .select("subscription_id")
-        .eq("collected_date", run.run_date)
-        .in("subscription_id", subscriptionIds);
-
-      if (eCols) return res.status(500).json({ error: eCols.message });
-      collectedMap = new Map((cols || []).map((c) => [c.subscription_id, true]));
-    }
-
-    const subStops = subsDue.map((s) => ({
-      key: `subscription:${s.id}`,
-      type: "subscription",
-      id: s.id,
-      address: s.address,
-      postcode: s.postcode,
-      route_slot: s.route_slot || null,
-      ops_notes: s.ops_notes || null,
-      extra_bags: Number(s.extra_bags) || 0,
-      use_own_bin: !!s.use_own_bin,
-      collected: !!collectedMap.get(s.id),
-    }));
-
-    // BOOKINGS due that day (still uses service_date)
-    let bookingsQ = supabase
-      .from("bookings")
-      .select("id,title,service_date,postcode,address,route_day,route_area,route_slot,status,completed_at,total_pence,notes,payload")
-      .eq("service_date", run.run_date)
-      .eq("route_day", run.route_day)
-      .eq("route_area", run.route_area)
-      .not("status", "in", "(cancelled)");
-
-    if (runSlot !== "ANY") {
-      bookingsQ = bookingsQ.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
-    }
-
-    const { data: bookings, error: eBookings } = await bookingsQ
-      .order("postcode", { ascending: true })
-      .order("address", { ascending: true });
-
-    if (eBookings) return res.status(500).json({ error: eBookings.message });
-
-    const bookingStops = (bookings || []).map((b) => {
-      const isCompleted = String(b.status || "").toLowerCase() === "completed" || !!b.completed_at;
-      return {
-        key: `booking:${b.id}`,
-        type: "booking",
-        id: b.id,
-        title: String(b.title || "Booking"),
-        address: String(b.address || b?.payload?.address || "— address missing —"),
-        postcode: String(b.postcode || b?.payload?.postcode || "— postcode missing —"),
-        route_slot: b.route_slot || null,
-        total_pence: Number(b.total_pence) || 0,
-        notes: String(b.notes || b?.payload?.notes || ""),
-        collected: isCompleted,
-      };
-    });
-
-    const stops = [...subStops, ...bookingStops].sort((a, b) => {
-      const ap = String(a.postcode || "").localeCompare(String(b.postcode || ""));
-      if (ap !== 0) return ap;
-      const aa = String(a.address || "").localeCompare(String(b.address || ""));
-      if (aa !== 0) return aa;
-      return String(a.type || "").localeCompare(String(b.type || ""));
-    });
-
-    const totals = {
-      totalStops: stops.length,
-      totalExtraBags: subStops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
-      totalBookings: bookingStops.length,
-      totalSubscriptions: subStops.length,
-    };
-
-    let warning = "";
-    if (missingAnchor > 0) {
-      warning = `${missingAnchor} active subscription(s) are missing anchor_date, so they cannot be scheduled.`;
-    }
-
-    return res.status(200).json({ run, stops, totals, warning });
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || "Failed to load run" });
   }
+
+  async function markStop(stop) {
+    if (!run?.run_date) return;
+    const key = stop?.key || `${stop?.type}:${stop?.id}`;
+    setSavingKey(key);
+    setError("");
+    try {
+      const res = await fetch("/api/ops/mark-stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: stop.type, id: stop.id, date: run.run_date }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to mark collected");
+      await load();
+    } catch (e) {
+      setError(e.message || "Failed");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
+  async function undoStop(stop) {
+    if (!run?.run_date) return;
+    const key = stop?.key || `${stop?.type}:${stop?.id}`;
+    setSavingKey(key);
+    setError("");
+    try {
+      const res = await fetch("/api/ops/undo-stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: stop.type, id: stop.id, date: run.run_date }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to undo");
+      await load();
+    } catch (e) {
+      setError(e.message || "Failed");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto max-w-5xl px-3 py-4">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold text-slate-900">Ops • Run</h1>
+            <p className="text-sm text-slate-600">
+              Stops due for this run’s date + area + day + slot. Includes subscriptions + one-off bookings.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Link href="/ops/daily-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Day Planner
+            </Link>
+            <Link href="/ops/today" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Today
+            </Link>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+        ) : null}
+
+        {warning ? (
+          <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            {warning}
+          </div>
+        ) : null}
+
+        {loading ? (
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="text-sm text-slate-600">Loading run…</div>
+          </div>
+        ) : !run ? (
+          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div className="text-sm text-slate-700">Run not found.</div>
+          </div>
+        ) : (
+          <>
+            <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              <div className="text-base font-semibold text-slate-900">
+                {run.route_area} • {run.route_day} • {slotLabel}
+              </div>
+              <div className="mt-1 text-sm text-slate-600">
+                <span className="font-medium text-slate-700">{run.run_date}</span>
+                <span className="mx-2 text-slate-300">•</span>
+                <span className="font-medium text-slate-700">{vehicleLabel}</span>
+                <span className="mx-2 text-slate-300">•</span>
+                <span>{staffNames || "No staff assigned"}</span>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">Stops</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalStops}</div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">Subscriptions</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalSubscriptions || 0}</div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">Bookings</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">Extra bags</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalExtraBags}</div>
+                </div>
+              </div>
+
+              {/* Assignment */}
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-semibold text-slate-900">Assign this run</div>
+                <div className="mt-1 text-xs text-slate-600">
+                  Assign a vehicle and one or more staff. Drivers will only see runs assigned to them.
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700">Vehicle</label>
+                    <select
+                      value={vehicleId}
+                      onChange={(e) => setVehicleId(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+                    >
+                      <option value="">— no vehicle —</option>
+                      {vehicles
+                        .filter((v) => v.active !== false)
+                        .map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.registration}{v.name ? ` • ${v.name}` : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold text-slate-700">Staff / team</div>
+                    <div className="mt-2 max-h-40 overflow-auto rounded-xl border border-slate-200 bg-white p-2">
+                      {staff.filter((s) => s.active !== false).length ? (
+                        staff
+                          .filter((s) => s.active !== false)
+                          .map((s) => (
+                            <label key={s.id} className="flex items-center gap-2 px-2 py-1 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={staffIds.includes(s.id)}
+                                onChange={() => toggleStaff(s.id)}
+                              />
+                              <span className="text-slate-900">{s.name}</span>
+                              {s.role ? <span className="text-xs text-slate-500">({s.role})</span> : null}
+                            </label>
+                          ))
+                      ) : (
+                        <div className="px-2 py-2 text-sm text-slate-600">
+                          No active staff found. Add staff in <Link className="underline" href="/ops/staff">/ops/staff</Link>.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={saveAssignment}
+                    disabled={assignSaving}
+                    className={cx(
+                      "rounded-xl px-4 py-2 text-sm font-semibold",
+                      assignSaving ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black"
+                    )}
+                  >
+                    {assignSaving ? "Saving…" : "Save assignment"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs text-slate-500">
+                Slot matching: AM run includes AM + ANY + blank. PM run includes PM + ANY + blank. ANY includes all.
+              </div>
+
+              {run.notes ? <div className="mt-3 text-sm text-slate-600">{run.notes}</div> : null}
+            </div>
+
+            {stops.length === 0 ? (
+              <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                <div className="text-sm text-slate-700">No due stops match this run.</div>
+              </div>
+            ) : (
+              <div className="space-y-2 pb-10">
+                {stops.map((s) => {
+                  const key = s.key || `${s.type}:${s.id}`;
+                  const saving = savingKey === key;
+                  const isBooking = s.type === "booking";
+
+                  return (
+                    <div key={key} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="text-base font-semibold text-slate-900">{s.address}</div>
+
+                            <span
+                              className={cx(
+                                "rounded-full px-2 py-1 text-xs font-semibold ring-1",
+                                isBooking ? "bg-indigo-50 text-indigo-800 ring-indigo-200" : "bg-slate-100 text-slate-700 ring-slate-200"
+                              )}
+                            >
+                              {isBooking ? "BOOKING" : "SUBSCRIPTION"}
+                            </span>
+
+                            {s.collected ? (
+                              <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                                collected
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                due
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-1 text-sm text-slate-600">
+                            {s.postcode}
+                            <span className="mx-2 text-slate-300">•</span>
+                            Slot:{" "}
+                            <span className="font-semibold text-slate-800">
+                              {String(s.route_slot || "ANY").toUpperCase()}
+                            </span>
+
+                            {!isBooking ? (
+                              <>
+                                <span className="mx-2 text-slate-300">•</span>
+                                Extra bags:{" "}
+                                <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
+                                <span className="mx-2 text-slate-300">•</span>
+                                {s.use_own_bin ? "Own bin" : "Company bin"}
+                              </>
+                            ) : (
+                              <>
+                                <span className="mx-2 text-slate-300">•</span>
+                                <span className="font-semibold text-slate-800">{s.title || "Booking"}</span>
+                                {Number(s.total_pence) > 0 ? (
+                                  <>
+                                    <span className="mx-2 text-slate-300">•</span>
+                                    <span className="font-semibold text-slate-800">
+                                      {fmtGBPFromPence(s.total_pence)}
+                                    </span>
+                                  </>
+                                ) : null}
+                              </>
+                            )}
+                          </div>
+
+                          {!isBooking && s.ops_notes ? (
+                            <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div>
+                          ) : null}
+
+                          {isBooking && s.notes ? (
+                            <div className="mt-1 text-xs text-slate-500">{s.notes}</div>
+                          ) : null}
+                        </div>
+
+                        <div className="shrink-0 flex gap-2">
+                          {s.collected ? (
+                            <button
+                              type="button"
+                              onClick={() => undoStop(s)}
+                              disabled={saving}
+                              className={cx(
+                                "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                saving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                              )}
+                            >
+                              Undo
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => markStop(s)}
+                              disabled={saving}
+                              className={cx(
+                                "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                saving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                              )}
+                            >
+                              Collected
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
