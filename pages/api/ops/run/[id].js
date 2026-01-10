@@ -105,7 +105,6 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
-    // pull subscriptions for the area/day; compute "due" deterministically
     let q = supabase
       .from("subscriptions")
       .select(
@@ -179,7 +178,6 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ run, stops, totals, warning });
   } catch (e) {
-    // IMPORTANT: always JSON
     return res.status(500).json({ error: e?.message || "Failed to load run" });
   }
 }
