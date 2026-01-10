@@ -1,3 +1,4 @@
+// pages/api/ops/run/[id]/assign-staff.js
 import { getSupabaseAdmin } from "../../../../../lib/supabaseAdmin";
 
 export default async function handler(req, res) {
@@ -17,11 +18,7 @@ export default async function handler(req, res) {
 
   // normalize + de-dupe
   const cleaned = Array.from(
-    new Set(
-      staffIds
-        .map((x) => String(x || "").trim())
-        .filter(Boolean)
-    )
+    new Set(staffIds.map((x) => String(x || "").trim()).filter(Boolean))
   );
 
   try {
@@ -36,16 +33,12 @@ export default async function handler(req, res) {
     if (!run) return res.status(404).json({ error: "Run not found" });
 
     // Delete existing assignments for this run
-    const { error: eDel } = await supabase
-      .from("daily_run_staff")
-      .delete()
-      .eq("daily_run_id", runId);
-
+    const { error: eDel } = await supabase.from("daily_run_staff").delete().eq("run_id", runId);
     if (eDel) return res.status(500).json({ error: eDel.message });
 
     // Insert new assignments (if any)
     if (cleaned.length) {
-      const rows = cleaned.map((staff_id) => ({ daily_run_id: runId, staff_id }));
+      const rows = cleaned.map((staff_id) => ({ run_id: runId, staff_id }));
       const { error: eIns } = await supabase.from("daily_run_staff").insert(rows);
       if (eIns) return res.status(500).json({ error: eIns.message });
     }
