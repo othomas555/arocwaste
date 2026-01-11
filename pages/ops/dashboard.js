@@ -49,6 +49,11 @@ export default function OpsDashboard({
       ),
     },
     {
+      title: "Today list",
+      desc: "Due today + mark collected/undo (writes to subscription_collections).",
+      href: "/ops/today",
+    },
+    {
       title: "Daily runs",
       desc: "Create runs, assign vehicle + staff, open run views.",
       href: "/ops/daily-runs",
@@ -59,20 +64,18 @@ export default function OpsDashboard({
       href: "/ops/routes",
     },
     {
-      title: "Catalogue",
-      desc: "Edit furniture/appliance items and prices (no GitHub changes needed).",
-      href: "/ops/catalogue",
-    },
-    {
-      title: "Today list",
-      desc: "Due today + mark collected/undo (writes to subscription_collections).",
-      href: "/ops/today",
-    },
-    {
       title: "Bulk assign routes",
       desc: "Re-apply route_area/day/slot from postcode to existing subscribers.",
       href: "/ops/route-assign",
     },
+
+    // ✅ NEW: catalogue editor
+    {
+      title: "Catalogue",
+      desc: "Edit furniture + appliances items and prices (public pages update immediately).",
+      href: "/ops/catalogue",
+    },
+
     {
       title: "Staff",
       desc: "Manage drivers/staff used for run assignments.",
@@ -109,14 +112,6 @@ export default function OpsDashboard({
             >
               Open Subscribers
             </Link>
-
-            <Link
-              href="/ops/catalogue"
-              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
-            >
-              Edit catalogue
-            </Link>
-
             <Link
               href="/ops/billing"
               className={classNames(
@@ -204,9 +199,6 @@ export default function OpsDashboard({
             <li>
               If routes change, update <span className="font-mono">/ops/routes</span> then use{" "}
               <span className="font-mono">/ops/route-assign</span> to apply to existing customers.
-            </li>
-            <li>
-              If pricing/items change, update <span className="font-mono">/ops/catalogue</span> (no code deploy needed).
             </li>
           </ul>
         </div>
