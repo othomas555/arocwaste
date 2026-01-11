@@ -3,7 +3,6 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 
 import Layout from "../components/layout";
-import { findRouteForPostcode, nextServiceDatesForDay } from "../utils/postcode";
 import { basketGet, basketSubtotal } from "../utils/basket";
 
 // ---- helpers ----
@@ -21,6 +20,47 @@ function clampQty(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 1;
   return Math.max(1, Math.min(50, Math.trunc(x)));
+}
+
+const DAY_INDEX = {
+  Monday: 1,
+  Tuesday: 2,
+  Wednesday: 3,
+  Thursday: 4,
+  Friday: 5,
+  Saturday: 6,
+  Sunday: 7,
+};
+
+function nextServiceDatesForDay(dayName, count = 5) {
+  const target = DAY_INDEX[String(dayName || "").trim()] || 0;
+  if (!target) return [];
+
+  const out = [];
+  const now = new Date();
+
+  // JS: Sun=0..Sat=6. Convert to Mon=1..Sun=7
+  const todayIdx = ((now.getDay() + 6) % 7) + 1;
+  let delta = (target - todayIdx + 7) % 7;
+
+  // Start from next occurrence (including today if same day)
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + delta);
+
+  for (let i = 0; i < count; i++) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const da = String(d.getDate()).padStart(2, "0");
+    out.push(`${y}-${m}-${da}`);
+    d.setDate(d.getDate() + 7);
+  }
+
+  return out;
+}
+
+function cleanPostcodeInput(v) {
+  return String(v || "").trim().toUpperCase();
 }
 
 export default function CheckoutPage() {
@@ -47,14 +87,58 @@ export default function CheckoutPage() {
 
   // postcode check state
   const [postcodeChecked, setPostcodeChecked] = useState(false);
+  const [checkingPostcode, setCheckingPostcode] = useState(false);
+  const [postcodeError, setPostcodeError] = useState("");
 
-  const route = useMemo(() => {
-    if (!postcodeChecked) return null;
-    return findRouteForPostcode(postcode);
-  }, [postcode, postcodeChecked]);
+  // route from authoritative API (/api/route-lookup -> route_areas)
+  // Shape we use in this page: { day, area, slot, route_area_id, matched_prefix }
+  const [route, setRoute] = useState(null);
+
+  async function checkPostcode() {
+    setPostcodeError("");
+    setPostcodeChecked(false);
+    setRoute(null);
+    setCollectionDateISO("");
+
+    const pc = cleanPostcodeInput(postcode);
+    if (!pc) {
+      setPostcodeError("Enter a postcode.");
+      return;
+    }
+
+    setCheckingPostcode(true);
+    try {
+      const res = await fetch(`/api/route-lookup?postcode=${encodeURIComponent(pc)}`);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to check postcode");
+
+      setPostcodeChecked(true);
+
+      if (!json?.in_area || !json?.default) {
+        setRoute(null);
+        return;
+      }
+
+      const def = json.default;
+
+      setRoute({
+        day: def.route_day,
+        area: def.route_area || "",
+        slot: def.slot || "ANY",
+        route_area_id: def.route_area_id || null,
+        matched_prefix: def.matched_prefix || "",
+      });
+    } catch (e) {
+      setPostcodeError(e?.message || "Failed to check postcode");
+      setPostcodeChecked(false);
+      setRoute(null);
+    } finally {
+      setCheckingPostcode(false);
+    }
+  }
 
   const allowedDates = useMemo(() => {
-    if (!route) return [];
+    if (!route?.day) return [];
     return nextServiceDatesForDay(route.day, 5);
   }, [route]);
 
@@ -157,6 +241,7 @@ export default function CheckoutPage() {
     params.set("date", collectionDateISO);
     params.set("routeDay", route.day);
     params.set("routeArea", route.area || "");
+    params.set("routeSlot", String(route.slot || "ANY").toUpperCase());
 
     params.set("time", timeOption);
     params.set("timeAdd", String(timeAddOn));
@@ -237,7 +322,9 @@ export default function CheckoutPage() {
                         onChange={(e) => {
                           setPostcode(e.target.value);
                           setPostcodeChecked(false);
+                          setRoute(null);
                           setCollectionDateISO("");
+                          setPostcodeError("");
                         }}
                         className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 uppercase outline-none focus:border-black"
                         placeholder="e.g. NP20 1AB"
@@ -246,25 +333,35 @@ export default function CheckoutPage() {
 
                     <button
                       type="button"
-                      onClick={() => setPostcodeChecked(true)}
-                      className="inline-flex items-center justify-center rounded-xl bg-black px-5 py-3 text-white hover:opacity-90"
+                      onClick={checkPostcode}
+                      disabled={checkingPostcode}
+                      className={[
+                        "inline-flex items-center justify-center rounded-xl px-5 py-3 text-white",
+                        checkingPostcode ? "bg-gray-400 cursor-not-allowed" : "bg-black hover:opacity-90",
+                      ].join(" ")}
                     >
-                      Check postcode
+                      {checkingPostcode ? "Checking…" : "Check postcode"}
                     </button>
                   </div>
 
-                  {postcodeChecked && !route && (
+                  {postcodeError ? (
+                    <div className="mt-4 rounded-xl bg-red-50 p-4 text-sm text-red-800">
+                      {postcodeError}
+                    </div>
+                  ) : null}
+
+                  {postcodeChecked && !route && !postcodeError ? (
                     <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
                       Sorry — we don’t cover that postcode yet.
                     </div>
-                  )}
+                  ) : null}
 
-                  {postcodeChecked && route && (
+                  {postcodeChecked && route ? (
                     <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
                       ✅ We cover <span className="font-medium">{route.area || "your area"}</span>. We’re in
                       your area on <span className="font-medium">{route.day}</span>.
                     </div>
-                  )}
+                  ) : null}
                 </div>
 
                 {/* 2) Date */}
@@ -289,9 +386,7 @@ export default function CheckoutPage() {
                             onClick={() => setCollectionDateISO(iso)}
                             className={[
                               "rounded-xl border p-4 text-left transition",
-                              isSelected
-                                ? "border-black bg-gray-50"
-                                : "border-gray-200 bg-white hover:bg-gray-50",
+                              isSelected ? "border-black bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50",
                             ].join(" ")}
                           >
                             <div className="text-sm text-gray-500">{iso}</div>
@@ -319,9 +414,7 @@ export default function CheckoutPage() {
                         onClick={() => setTimeOption(opt.key)}
                         className={[
                           "rounded-xl border p-4 text-left transition",
-                          timeOption === opt.key
-                            ? "border-black bg-gray-50"
-                            : "border-gray-200 bg-white hover:bg-gray-50",
+                          timeOption === opt.key ? "border-black bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50",
                         ].join(" ")}
                       >
                         <div className="font-medium">{opt.label}</div>
@@ -347,9 +440,7 @@ export default function CheckoutPage() {
                         onClick={() => setRemoveFromProperty(opt.key)}
                         className={[
                           "rounded-xl border p-4 text-left transition",
-                          removeFromProperty === opt.key
-                            ? "border-black bg-gray-50"
-                            : "border-gray-200 bg-white hover:bg-gray-50",
+                          removeFromProperty === opt.key ? "border-black bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50",
                         ].join(" ")}
                       >
                         <div className="font-medium">{opt.label}</div>
@@ -449,9 +540,7 @@ export default function CheckoutPage() {
                           {it.title} <span className="text-gray-500">x{clampQty(it.qty)}</span>
                           <div className="text-xs text-gray-500">£{Number(it.unitPrice) || 0} each</div>
                         </div>
-                        <div className="font-medium">
-                          £{(Number(it.unitPrice) || 0) * clampQty(it.qty)}
-                        </div>
+                        <div className="font-medium">£{(Number(it.unitPrice) || 0) * clampQty(it.qty)}</div>
                       </div>
                     ))}
 
@@ -471,8 +560,7 @@ export default function CheckoutPage() {
                     </div>
 
                     <div className="pt-2 text-gray-600">
-                      Collection date:{" "}
-                      <span className="font-medium text-gray-900">{collectionDateISO || "—"}</span>
+                      Collection date: <span className="font-medium text-gray-900">{collectionDateISO || "—"}</span>
                     </div>
 
                     <div className="pt-1 text-gray-600">
@@ -500,9 +588,7 @@ export default function CheckoutPage() {
 
                 <div className="rounded-2xl border bg-white p-6 shadow-sm">
                   <h3 className="text-lg font-semibold">Need to add more?</h3>
-                  <p className="mt-2 text-sm text-gray-600">
-                    You can add more items before paying.
-                  </p>
+                  <p className="mt-2 text-sm text-gray-600">You can add more items before paying.</p>
                   <div className="mt-4 flex flex-col gap-2 sm:flex-row">
                     <Link
                       href="/furniture"
@@ -518,7 +604,6 @@ export default function CheckoutPage() {
                     </Link>
                   </div>
                 </div>
-
               </div>
             </div>
           </>
