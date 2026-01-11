@@ -7,6 +7,12 @@ function cx(...xs) {
   return xs.filter(Boolean).join(" ");
 }
 
+function moneyGBP(pence) {
+  const n = Number(pence);
+  if (!Number.isFinite(n)) return "—";
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n / 100);
+}
+
 export default function DriverRunPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -18,7 +24,13 @@ export default function DriverRunPage() {
 
   const [run, setRun] = useState(null);
   const [stops, setStops] = useState([]);
-  const [totals, setTotals] = useState({ totalStops: 0, totalExtraBags: 0 });
+  const [bookings, setBookings] = useState([]);
+  const [totals, setTotals] = useState({
+    totalStops: 0,
+    totalExtraBags: 0,
+    totalBookings: 0,
+    totalCompletedBookings: 0,
+  });
 
   useEffect(() => {
     let mounted = true;
@@ -53,7 +65,10 @@ export default function DriverRunPage() {
 
       setRun(json.run || null);
       setStops(Array.isArray(json.stops) ? json.stops : []);
-      setTotals(json.totals || { totalStops: 0, totalExtraBags: 0 });
+      setBookings(Array.isArray(json.bookings) ? json.bookings : []);
+      setTotals(
+        json.totals || { totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalCompletedBookings: 0 }
+      );
     } catch (e) {
       setError(e?.message || "Load failed");
     } finally {
@@ -127,6 +142,30 @@ export default function DriverRunPage() {
     }
   }
 
+  async function setBookingCompleted(booking_id, completed) {
+    setSavingKey(`booking:${booking_id}`);
+    setError("");
+    try {
+      const token = session?.access_token;
+      if (!token) throw new Error("Not logged in.");
+
+      const res = await fetch("/api/driver/bookings/set-completed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ booking_id, completed, run_id: run?.id }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to update booking");
+
+      await load();
+    } catch (e) {
+      setError(e?.message || "Failed to update booking");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-4xl px-4 py-6">
@@ -174,7 +213,7 @@ export default function DriverRunPage() {
                 <span className="font-medium text-slate-700">{vehicleLabel}</span>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Stops</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalStops}</div>
@@ -183,12 +222,116 @@ export default function DriverRunPage() {
                   <div className="text-xs font-semibold text-slate-600">Extra bags</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalExtraBags}</div>
                 </div>
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">One-off bookings</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
+                  <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
+                </div>
               </div>
             </div>
 
+            {/* ONE-OFF BOOKINGS */}
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="text-base font-semibold text-slate-900">One-off bookings</div>
+              <div className="mt-1 text-sm text-slate-600">Jobs due for this run.</div>
+
+              {bookings.length === 0 ? (
+                <div className="mt-3 text-sm text-slate-700">No one-off bookings for this run.</div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {bookings.map((b) => {
+                    const completed = !!b.completed_at;
+                    const isSaving = savingKey === `booking:${b.id}`;
+                    return (
+                      <div key={b.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-base font-semibold text-slate-900">
+                              {b.booking_ref || "Booking"}
+                              {completed ? (
+                                <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                                  completed
+                                </span>
+                              ) : (
+                                <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                  due
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
+
+                            <div className="mt-1 text-sm text-slate-600">
+                              {b.postcode}
+                              <span className="mx-2 text-slate-300">•</span>
+                              {moneyGBP(b.total_pence)}
+                              <span className="mx-2 text-slate-300">•</span>
+                              Slot:{" "}
+                              <span className="font-semibold text-slate-800">
+                                {String(b.route_slot || "ANY").toUpperCase()}
+                              </span>
+                            </div>
+
+                            {b.items_summary ? (
+                              <div className="mt-1 text-xs text-slate-600">Items: {b.items_summary}</div>
+                            ) : null}
+
+                            {b.notes ? <div className="mt-1 text-xs text-slate-600">Notes: {b.notes}</div> : null}
+
+                            <div className="mt-1 text-xs text-slate-600">
+                              {b.phone ? (
+                                <>
+                                  Phone: <span className="font-semibold text-slate-800">{b.phone}</span>
+                                </>
+                              ) : (
+                                <span className="text-slate-500">No phone</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="shrink-0 flex gap-2">
+                            {completed ? (
+                              <button
+                                type="button"
+                                onClick={() => setBookingCompleted(b.id, false)}
+                                disabled={isSaving}
+                                className={cx(
+                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                  isSaving
+                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                )}
+                              >
+                                Undo
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setBookingCompleted(b.id, true)}
+                                disabled={isSaving}
+                                className={cx(
+                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                  isSaving
+                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                )}
+                              >
+                                Completed
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* SUBSCRIPTION STOPS */}
             {stops.length === 0 ? (
               <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-                No stops due for this run.
+                No subscription stops due for this run.
               </div>
             ) : (
               <div className="space-y-2 pb-10">
