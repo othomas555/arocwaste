@@ -80,7 +80,10 @@ function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
   if (diffDays < 0) return { due: false, reason: "before_anchor" };
 
   const periodDays = freqWeeks(frequency) * 7;
-  return { due: diffDays % periodDays === 0, reason: diffDays % periodDays === 0 ? "due" : "not_due" };
+  return {
+    due: diffDays % periodDays === 0,
+    reason: diffDays % periodDays === 0 ? "due" : "not_due",
+  };
 }
 
 function matchesRunSlot(runSlot, subSlot) {
@@ -106,7 +109,7 @@ export default async function handler(req, res) {
   if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
 
   try {
-    const src = req.method === "GET" ? req.query : (req.body || {});
+    const src = req.method === "GET" ? req.query : req.body || {};
     const date = String(src.date || "").trim();
 
     if (!isValidYMD(date)) {
@@ -147,7 +150,7 @@ export default async function handler(req, res) {
       cardKeys.add(`${area}|${slot}`);
     }
 
-    // For each subscriber, decide if due on this date, then add them into whichever card slots match
+    // 2a) subscriptions due
     for (const s of subs || []) {
       const area = String(s.route_area || "").trim();
       if (!area) continue;
@@ -175,23 +178,69 @@ export default async function handler(req, res) {
       }
     }
 
+    // 3) one-off bookings due on this date (furniture/appliances/basket orders, etc)
+    // We match by service_date OR (legacy) collection_date, and count them into the same card keys.
+    let bookingsForDate = 0;
+    let bookingsMissingArea = 0;
+
+    const { data: bookings, error: eBookings } = await supabase
+      .from("bookings")
+      .select("id,status,route_area,route_slot,service_date,collection_date")
+      .neq("status", "cancelled")
+      .or(`service_date.eq.${date},collection_date.eq.${date}`);
+
+    if (eBookings) return res.status(500).json({ error: eBookings.message });
+
+    for (const b of bookings || []) {
+      // Only count booked work (keep this simple; you can widen later)
+      if (String(b.status || "").toLowerCase() !== "booked") continue;
+
+      const area = String(b.route_area || "").trim();
+      if (!area) {
+        bookingsMissingArea++;
+        continue;
+      }
+
+      bookingsForDate++;
+
+      // Count this booking against whichever card slots match (AM/PM/ANY rules)
+      for (const key of cardKeys) {
+        const [cardArea, cardSlot] = key.split("|");
+        if (cardArea !== area) continue;
+
+        if (matchesRunSlot(cardSlot, b.route_slot)) {
+          dueCounts[key] = (dueCounts[key] || 0) + 1;
+        }
+      }
+    }
+
     let warning = "";
     if (missingAnchor > 0) {
       warning = `${missingAnchor} active subscription(s) are missing anchor_date, so they cannot be scheduled.`;
+    }
+
+    if (bookingsMissingArea > 0) {
+      warning = warning
+        ? `${warning} Also: ${bookingsMissingArea} booking(s) are missing route_area so cannot be shown on the day planner.`
+        : `${bookingsMissingArea} booking(s) are missing route_area so cannot be shown on the day planner.`;
     }
 
     return res.status(200).json({
       ok: true,
       date,
       route_day,
+
       // ✅ what daily-runs uses
       dueCounts,
+
       // useful for debugging / future UI
       routeAreas: routeAreas || [],
       totals: {
         routeAreas: (routeAreas || []).length,
         activeSubsForDay: (subs || []).length,
         missingAnchor,
+        bookingsForDate,
+        bookingsMissingArea,
       },
       warning,
     });
