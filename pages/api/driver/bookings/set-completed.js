@@ -19,26 +19,26 @@ export default async function handler(req, res) {
   const token = getBearerToken(req);
   if (!token) return res.status(401).json({ error: "Missing bearer token" });
 
+  const body = req.body || {};
+  const booking_id = String(body.booking_id || "").trim();
+  const run_id = String(body.run_id || "").trim();
+  const completed = !!body.completed;
+
+  if (!booking_id) return res.status(400).json({ error: "Missing booking_id" });
+  if (!run_id) return res.status(400).json({ error: "Missing run_id" });
+
   try {
-    const body = req.body || {};
-    const booking_id = String(body.booking_id || "").trim();
-    const run_id = String(body.run_id || "").trim();
-    const completed = !!body.completed;
-
-    if (!booking_id) return res.status(400).json({ error: "Missing booking_id" });
-    if (!run_id) return res.status(400).json({ error: "Missing run_id" });
-
-    // 1) Validate session -> email
+    // session
     const { data: userData, error: userErr } = await supabase.auth.getUser(token);
     if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
 
     const email = String(userData.user.email || "").trim().toLowerCase();
     if (!email) return res.status(401).json({ error: "No email on session" });
 
-    // 2) Staff lookup
+    // staff
     const { data: staffRow, error: eStaff } = await supabase
       .from("staff")
-      .select("id,email,active")
+      .select("id,name,email,role,active")
       .ilike("email", email)
       .maybeSingle();
 
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
     if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
     if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
-    // 3) Confirm staff assigned to run
+    // must be assigned to run
     const { data: linkRow, error: eLink } = await supabase
       .from("daily_run_staff")
       .select("run_id, staff_id")
@@ -57,24 +57,13 @@ export default async function handler(req, res) {
     if (eLink) return res.status(500).json({ error: eLink.message });
     if (!linkRow) return res.status(403).json({ error: "You are not assigned to this run" });
 
+    // update booking
     const patch = completed
-      ? {}
+      ? { completed_at: new Date().toISOString(), completed_by_run_id: run_id }
       : { completed_at: null, completed_by_run_id: null };
 
-    if (completed) {
-      patch.completed_at = new Date().toISOString();
-      patch.completed_by_run_id = run_id;
-    }
-
     const { error: eUp } = await supabase.from("bookings").update(patch).eq("id", booking_id);
-
-    if (eUp) {
-      return res.status(500).json({
-        error: eUp.message,
-        hint:
-          "If this mentions missing columns completed_at/completed_by_run_id, add them to bookings (SQL migration).",
-      });
-    }
+    if (eUp) return res.status(500).json({ error: eUp.message });
 
     return res.status(200).json({ ok: true });
   } catch (e) {
