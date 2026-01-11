@@ -75,24 +75,39 @@ function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
   return diffDays % periodDays === 0;
 }
 
-function buildBookingDescription(b) {
-  // Prefer explicit items_summary if you’re already saving it
-  const s = String(b?.items_summary || "").trim();
-  if (s) return s;
+function toQtyTitle(qty, title) {
+  const t = String(title || "").trim();
+  if (!t) return "";
+  const n = Number(qty);
+  const q = Number.isFinite(n) && n > 1 ? Math.trunc(n) : 1;
+  return q > 1 ? `${q} × ${t}` : t;
+}
 
-  // Try to build from payload.items: [{title, qty}] or similar
-  const items = b?.payload?.items;
+function buildBookingDescription(b) {
+  // Prefer payload items (basket mode)
+  const payload = b?.payload || null;
+
+  const items = payload?.items;
   if (Array.isArray(items) && items.length) {
     const parts = [];
     for (const it of items) {
       const title = String(it?.title || it?.name || "").trim();
       if (!title) continue;
       const qty = Number(it?.qty ?? it?.quantity ?? 1);
-      const q = Number.isFinite(qty) && qty > 1 ? qty : 1;
-      parts.push(`${q} ${title}`);
+      parts.push(toQtyTitle(qty, title));
     }
     if (parts.length) return parts.join(", ");
   }
+
+  // Single mode payload: title + qty
+  const pTitle = payload?.title;
+  const pQty = payload?.qty;
+  const single = toQtyTitle(pQty, pTitle);
+  if (single) return single;
+
+  // Fallback to title column (often “Basket order”)
+  const colTitle = String(b?.title || "").trim();
+  if (colTitle && colTitle.toLowerCase() !== "basket order") return colTitle;
 
   return "One-off collection";
 }
@@ -126,7 +141,7 @@ function applyStopOrder({ stopOrder, bookings, subs }) {
     }
   }
 
-  // Append anything not in stop_order (new items etc.)
+  // Append anything not in stop_order
   for (const b of bookings || []) {
     const k = `b:${String(b.id)}`;
     if (!used.has(k)) out.push(b);
@@ -213,7 +228,7 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
-    // 5) Candidate subscriptions (area/day, slot broad match)
+    // 5) Candidate subscriptions
     let subsQuery = supabase
       .from("subscriptions")
       .select(
@@ -243,7 +258,7 @@ export default async function handler(req, res) {
     const { data: subsRaw, error: eSubs } = await subsQuery;
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
-    // 6) Filter due for subscriptions
+    // 6) Filter due subs
     const subsDue = [];
     const dueSubIds = [];
     for (const s of subsRaw || []) {
@@ -264,7 +279,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 7) Collected flags for subs
+    // 7) Collected flags
     let collectedSet = new Set();
     if (dueSubIds.length) {
       const { data: collectedRows, error: eCollected } = await supabase
@@ -290,13 +305,11 @@ export default async function handler(req, res) {
       use_own_bin: !!s.use_own_bin,
       ops_notes: s.ops_notes || "",
       collected: collectedSet.has(s.id),
-      // used for sensible fallback sorting
       _sortPostcode: String(s.postcode || ""),
       _sortAddress: String(s.address || ""),
     }));
 
     // 8) Bookings due for this run
-    // (We assume create-checkout-session now populates route_area/route_day/route_slot and service_date or collection_date text)
     const { data: bookingRows, error: eBookings } = await supabase
       .from("bookings")
       .select(
@@ -314,7 +327,7 @@ export default async function handler(req, res) {
         phone,
         email,
         name,
-        items_summary,
+        title,
         total_pence,
         payload,
         payment_status,
@@ -337,7 +350,6 @@ export default async function handler(req, res) {
       if (!dueDate || dueDate !== run.run_date) continue;
       if (!matchesRunSlot(runSlot, b.route_slot)) continue;
 
-      // Only show booked/paid/pending (don’t hide pending — ops wants to see work)
       const st = String(b.status || "booked").toLowerCase();
       if (st === "cancelled" || st === "canceled") continue;
 
@@ -356,24 +368,21 @@ export default async function handler(req, res) {
       notes: b.notes || "",
       title: b.booking_ref || "One-off booking",
       description: buildBookingDescription(b),
-      items_summary: b.items_summary || "",
       total_pence: b.total_pence ?? null,
       payment_status: b.payment_status || "",
       completed_at: b.completed_at || null,
       completed_by_run_id: b.completed_by_run_id || null,
-      // fallback sort keys
       _sortPostcode: String(b.postcode || ""),
       _sortAddress: String(b.address || ""),
     }));
 
-    // 9) Order: apply stop_order if present, else sensible default
+    // 9) Merge + order
     let merged = applyStopOrder({
       stopOrder: run.stop_order,
       bookings: bookingStops,
       subs: subsStops,
     });
 
-    // If there is no stop_order, do a stable sort by postcode/address (but keep bookings first)
     const hasStopOrder = Array.isArray(run.stop_order) && run.stop_order.length > 0;
     if (!hasStopOrder) {
       merged = merged.sort((a, b) => {
@@ -392,7 +401,6 @@ export default async function handler(req, res) {
     const totalBookings = bookingStops.length;
     const totalCompletedBookings = bookingStops.filter((b) => !!b.completed_at).length;
 
-    // Strip internal sort keys
     const items = merged.map((x) => {
       const copy = { ...x };
       delete copy._sortPostcode;
