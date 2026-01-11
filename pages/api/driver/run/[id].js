@@ -1,3 +1,4 @@
+// pages/api/driver/run/[id].js
 import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 function getBearerToken(req) {
@@ -6,44 +7,14 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
-function parseYMD(ymd) {
-  const s = String(ymd || "").slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-  const [y, m, d] = s.split("-").map((x) => parseInt(x, 10));
-  return new Date(Date.UTC(y, m - 1, d));
-}
-
-function daysBetweenUTC(a, b) {
-  const ms = b.getTime() - a.getTime();
-  return Math.floor(ms / 86400000);
-}
-
-function periodDaysForFrequency(freq) {
-  const f = String(freq || "").toLowerCase();
-  if (f === "weekly") return 7;
-  if (f === "fortnightly") return 14;
-  if (f === "threeweekly") return 21;
-  return null;
-}
-
-function isDueOnDate(runDateYMD, anchorDateYMD, frequency) {
-  const runDate = parseYMD(runDateYMD);
-  const anchorDate = parseYMD(anchorDateYMD);
-  const period = periodDaysForFrequency(frequency);
-  if (!runDate || !anchorDate || !period) return false;
-  const diff = daysBetweenUTC(anchorDate, runDate);
-  if (diff < 0) return false;
-  return diff % period === 0;
-}
-
 function normSlot(v) {
   const s = String(v || "ANY").toUpperCase().trim();
   return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
 }
 
-function matchesRunSlot(runSlot, itemSlot) {
+function matchesRunSlot(runSlot, rowSlot) {
   const r = normSlot(runSlot);
-  const raw = String(itemSlot ?? "").trim();
+  const raw = String(rowSlot ?? "").trim();
   const s = raw ? normSlot(raw) : "BLANK";
   if (r === "ANY") return true;
   if (r === "AM") return s === "AM" || s === "ANY" || s === "BLANK";
@@ -51,27 +22,121 @@ function matchesRunSlot(runSlot, itemSlot) {
   return true;
 }
 
-function safeItems(payload) {
-  try {
-    const items = payload?.items;
-    if (!Array.isArray(items)) return [];
-    return items
-      .map((x) => ({
-        title: String(x?.title || "").trim(),
-        qty: Number(x?.qty || x?.quantity || 1) || 1,
-      }))
-      .filter((x) => x.title);
-  } catch {
-    return [];
-  }
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const DAY_INDEX = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
+
+function isValidYMD(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+function ymdToUTCDate(ymd) {
+  const [Y, M, D] = ymd.split("-").map((n) => Number(n));
+  return new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
+}
+function weekdayFromYMD(ymd) {
+  const dt = ymdToUTCDate(ymd);
+  return DAY_NAMES[dt.getUTCDay()] || null;
+}
+function addDaysYMD(ymd, days) {
+  const dt = ymdToUTCDate(ymd);
+  dt.setUTCDate(dt.getUTCDate() + days);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+function daysBetweenYMD(a, b) {
+  const da = ymdToUTCDate(a);
+  const db = ymdToUTCDate(b);
+  return Math.round((db.getTime() - da.getTime()) / (24 * 60 * 60 * 1000));
+}
+function freqWeeks(frequency) {
+  const f = String(frequency || "").toLowerCase().trim();
+  if (f === "weekly") return 1;
+  if (f === "fortnightly") return 2;
+  if (f === "threeweekly") return 3;
+  return 1;
+}
+function nextOnOrAfter(anchorYMD, routeDay) {
+  if (!isValidYMD(anchorYMD)) return null;
+  const aDowName = weekdayFromYMD(anchorYMD);
+  const aDow = DAY_INDEX[aDowName];
+  const tDow = DAY_INDEX[String(routeDay || "").trim()];
+  if (aDow === undefined || tDow === undefined) return null;
+  const delta = (tDow - aDow + 7) % 7;
+  return addDaysYMD(anchorYMD, delta);
+}
+function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
+  if (!isValidYMD(runDate) || !isValidYMD(anchorDate)) return false;
+  const effectiveAnchor = nextOnOrAfter(anchorDate, routeDay);
+  if (!effectiveAnchor) return false;
+  const diffDays = daysBetweenYMD(effectiveAnchor, runDate);
+  if (diffDays < 0) return false;
+  const periodDays = freqWeeks(frequency) * 7;
+  return diffDays % periodDays === 0;
 }
 
-function safeItemsSummary(payload) {
-  const items = safeItems(payload);
-  if (!items.length) return "";
-  const parts = items.slice(0, 3).map((x) => `${x.title}${x.qty > 1 ? ` ×${x.qty}` : ""}`);
-  const suffix = items.length > 3 ? ` + ${items.length - 3} more` : "";
-  return parts.join(", ") + suffix;
+function buildBookingDescription(b) {
+  // Prefer explicit items_summary if you’re already saving it
+  const s = String(b?.items_summary || "").trim();
+  if (s) return s;
+
+  // Try to build from payload.items: [{title, qty}] or similar
+  const items = b?.payload?.items;
+  if (Array.isArray(items) && items.length) {
+    const parts = [];
+    for (const it of items) {
+      const title = String(it?.title || it?.name || "").trim();
+      if (!title) continue;
+      const qty = Number(it?.qty ?? it?.quantity ?? 1);
+      const q = Number.isFinite(qty) && qty > 1 ? qty : 1;
+      parts.push(`${q} ${title}`);
+    }
+    if (parts.length) return parts.join(", ");
+  }
+
+  return "One-off collection";
+}
+
+function applyStopOrder({ stopOrder, bookings, subs }) {
+  const bookMap = new Map((bookings || []).map((b) => [String(b.id), b]));
+  const subMap = new Map((subs || []).map((s) => [String(s.id), s]));
+
+  const out = [];
+  const used = new Set();
+
+  if (Array.isArray(stopOrder)) {
+    for (const x of stopOrder) {
+      const type = String(x?.type || "").toLowerCase();
+      const id = String(x?.id || "").trim();
+      if (!id) continue;
+
+      if (type === "booking") {
+        const b = bookMap.get(id);
+        if (b && !used.has(`b:${id}`)) {
+          out.push(b);
+          used.add(`b:${id}`);
+        }
+      } else if (type === "subscription") {
+        const s = subMap.get(id);
+        if (s && !used.has(`s:${id}`)) {
+          out.push(s);
+          used.add(`s:${id}`);
+        }
+      }
+    }
+  }
+
+  // Append anything not in stop_order (new items etc.)
+  for (const b of bookings || []) {
+    const k = `b:${String(b.id)}`;
+    if (!used.has(k)) out.push(b);
+  }
+  for (const s of subs || []) {
+    const k = `s:${String(s.id)}`;
+    if (!used.has(k)) out.push(s);
+  }
+
+  return out;
 }
 
 export default async function handler(req, res) {
@@ -90,12 +155,14 @@ export default async function handler(req, res) {
   if (!runId) return res.status(400).json({ error: "Missing run id" });
 
   try {
+    // 1) Validate session -> email
     const { data: userData, error: userErr } = await supabase.auth.getUser(token);
     if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
 
     const email = String(userData.user.email || "").trim().toLowerCase();
     if (!email) return res.status(401).json({ error: "No email on session" });
 
+    // 2) Staff lookup
     const { data: staffRow, error: eStaff } = await supabase
       .from("staff")
       .select("id,name,email,role,active")
@@ -106,6 +173,7 @@ export default async function handler(req, res) {
     if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
     if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
+    // 3) Confirm staff assigned to this run
     const { data: linkRow, error: eLink } = await supabase
       .from("daily_run_staff")
       .select("run_id, staff_id")
@@ -116,6 +184,7 @@ export default async function handler(req, res) {
     if (eLink) return res.status(500).json({ error: eLink.message });
     if (!linkRow) return res.status(403).json({ error: "You are not assigned to this run" });
 
+    // 4) Load run (include stop_order)
     const { data: run, error: eRun } = await supabase
       .from("daily_runs")
       .select(
@@ -138,9 +207,13 @@ export default async function handler(req, res) {
     if (eRun) return res.status(500).json({ error: eRun.message });
     if (!run) return res.status(404).json({ error: "Run not found" });
 
+    if (!isValidYMD(run.run_date)) {
+      return res.status(500).json({ error: "Run has invalid run_date", debug: { run_date: run.run_date } });
+    }
+
     const runSlot = normSlot(run.route_slot);
 
-    // --- SUBSCRIPTIONS (unchanged, with slot rules enforced in JS)
+    // 5) Candidate subscriptions (area/day, slot broad match)
     let subsQuery = supabase
       .from("subscriptions")
       .select(
@@ -167,135 +240,172 @@ export default async function handler(req, res) {
       subsQuery = subsQuery.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
     }
 
-    const { data: subs, error: eSubs } = await subsQuery;
+    const { data: subsRaw, error: eSubs } = await subsQuery;
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
-    const dueSubs = (subs || [])
-      .filter((s) => matchesRunSlot(runSlot, s.route_slot))
-      .filter((s) => isDueOnDate(run.run_date, s.anchor_date, s.frequency));
+    // 6) Filter due for subscriptions
+    const subsDue = [];
+    const dueSubIds = [];
+    for (const s of subsRaw || []) {
+      const anchor = s.anchor_date ? String(s.anchor_date).slice(0, 10) : "";
+      if (!anchor) continue;
+      if (!matchesRunSlot(runSlot, s.route_slot)) continue;
 
-    const dueIds = dueSubs.map((s) => s.id);
+      if (
+        isDueOnDate({
+          runDate: run.run_date,
+          routeDay: s.route_day,
+          anchorDate: anchor,
+          frequency: s.frequency,
+        })
+      ) {
+        subsDue.push(s);
+        dueSubIds.push(s.id);
+      }
+    }
 
+    // 7) Collected flags for subs
     let collectedSet = new Set();
-    if (dueIds.length) {
+    if (dueSubIds.length) {
       const { data: collectedRows, error: eCollected } = await supabase
         .from("subscription_collections")
         .select("subscription_id")
         .eq("collected_date", run.run_date)
-        .in("subscription_id", dueIds);
+        .in("subscription_id", dueSubIds);
 
       if (eCollected) return res.status(500).json({ error: eCollected.message });
-      for (const r of collectedRows || []) if (r?.subscription_id) collectedSet.add(r.subscription_id);
+      for (const r of collectedRows || []) {
+        if (r?.subscription_id) collectedSet.add(r.subscription_id);
+      }
     }
 
-    const stops = dueSubs.map((s) => ({
+    const subsStops = (subsDue || []).map((s) => ({
       type: "subscription",
-      id: s.id,
+      id: String(s.id),
       address: s.address || "",
       postcode: s.postcode || "",
-      extra_bags: s.extra_bags || 0,
+      title: "Empty wheelie bin",
+      description: "Empty wheelie bin",
+      extra_bags: Number(s.extra_bags) || 0,
       use_own_bin: !!s.use_own_bin,
       ops_notes: s.ops_notes || "",
       collected: collectedSet.has(s.id),
+      // used for sensible fallback sorting
+      _sortPostcode: String(s.postcode || ""),
+      _sortAddress: String(s.address || ""),
     }));
 
-    // --- BOOKINGS (expanded details)
-    let bq = supabase
+    // 8) Bookings due for this run
+    // (We assume create-checkout-session now populates route_area/route_day/route_slot and service_date or collection_date text)
+    const { data: bookingRows, error: eBookings } = await supabase
       .from("bookings")
       .select(
-        "id, booking_ref, service_date, collection_date, route_area, route_day, route_slot, status, payment_status, name, email, phone, postcode, address, notes, total_pence, payload, completed_at, completed_by_run_id"
+        `
+        id,
+        booking_ref,
+        service_date,
+        collection_date,
+        route_area,
+        route_day,
+        route_slot,
+        address,
+        postcode,
+        notes,
+        phone,
+        email,
+        name,
+        items_summary,
+        total_pence,
+        payload,
+        payment_status,
+        status,
+        completed_at,
+        completed_by_run_id
+      `
       )
       .eq("route_area", run.route_area)
-      .eq("route_day", run.route_day)
-      .or(`service_date.eq.${run.run_date},collection_date.eq.${run.run_date}`)
-      .neq("status", "cancelled");
+      .eq("route_day", run.route_day);
 
-    if (runSlot !== "ANY") {
-      bq = bq.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
+    if (eBookings) return res.status(500).json({ error: eBookings.message });
+
+    const bookingsDue = [];
+    for (const b of bookingRows || []) {
+      const service = b?.service_date ? String(b.service_date).slice(0, 10) : "";
+      const coll = b?.collection_date ? String(b.collection_date).slice(0, 10) : "";
+      const dueDate = service || coll;
+
+      if (!dueDate || dueDate !== run.run_date) continue;
+      if (!matchesRunSlot(runSlot, b.route_slot)) continue;
+
+      // Only show booked/paid/pending (don’t hide pending — ops wants to see work)
+      const st = String(b.status || "booked").toLowerCase();
+      if (st === "cancelled" || st === "canceled") continue;
+
+      bookingsDue.push(b);
     }
 
-    const { data: bookingsRaw, error: eBookings } = await bq;
-    if (eBookings) {
-      return res.status(500).json({
-        error: eBookings.message,
-        hint:
-          "If this mentions missing columns (stop_order/completed_at/etc.) run the SQL migrations.",
+    const bookingStops = (bookingsDue || []).map((b) => ({
+      type: "booking",
+      id: String(b.id),
+      booking_ref: b.booking_ref || "",
+      address: b.address || "",
+      postcode: b.postcode || "",
+      customer_name: b.name || "",
+      email: b.email || "",
+      phone: b.phone || "",
+      notes: b.notes || "",
+      title: b.booking_ref || "One-off booking",
+      description: buildBookingDescription(b),
+      items_summary: b.items_summary || "",
+      total_pence: b.total_pence ?? null,
+      payment_status: b.payment_status || "",
+      completed_at: b.completed_at || null,
+      completed_by_run_id: b.completed_by_run_id || null,
+      // fallback sort keys
+      _sortPostcode: String(b.postcode || ""),
+      _sortAddress: String(b.address || ""),
+    }));
+
+    // 9) Order: apply stop_order if present, else sensible default
+    let merged = applyStopOrder({
+      stopOrder: run.stop_order,
+      bookings: bookingStops,
+      subs: subsStops,
+    });
+
+    // If there is no stop_order, do a stable sort by postcode/address (but keep bookings first)
+    const hasStopOrder = Array.isArray(run.stop_order) && run.stop_order.length > 0;
+    if (!hasStopOrder) {
+      merged = merged.sort((a, b) => {
+        const ta = String(a.type);
+        const tb = String(b.type);
+        if (ta !== tb) return ta === "booking" ? -1 : 1;
+        const pc = String(a._sortPostcode || "").localeCompare(String(b._sortPostcode || ""));
+        if (pc !== 0) return pc;
+        return String(a._sortAddress || "").localeCompare(String(b._sortAddress || ""));
       });
     }
 
-    const bookings = (bookingsRaw || [])
-      .filter((b) => matchesRunSlot(runSlot, b.route_slot))
-      .map((b) => ({
-        type: "booking",
-        id: b.id,
-        booking_ref: b.booking_ref,
-        route_slot: b.route_slot,
-        postcode: b.postcode || "",
-        address: b.address || "",
-        notes: b.notes || "",
-        name: b.name || "",
-        email: b.email || "",
-        phone: b.phone || "",
-        total_pence: b.total_pence,
-        payment_status: b.payment_status,
-        items: safeItems(b.payload),
-        items_summary: safeItemsSummary(b.payload),
-        completed_at: b.completed_at,
-        completed_by_run_id: b.completed_by_run_id,
-        completed: !!b.completed_at,
-      }));
+    // 10) Totals
+    const totalStops = subsStops.length;
+    const totalExtraBags = subsStops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0);
+    const totalBookings = bookingStops.length;
+    const totalCompletedBookings = bookingStops.filter((b) => !!b.completed_at).length;
 
-    // --- Apply saved run order (stop_order) if present
-    // stop_order should be an array like: [{type:"booking", id:"..."}, {type:"subscription", id:"..."}]
-    const stopOrder = Array.isArray(run.stop_order) ? run.stop_order : [];
-    if (stopOrder.length) {
-      const subMap = new Map(stops.map((x) => [x.id, x]));
-      const bookMap = new Map(bookings.map((x) => [x.id, x]));
-      const orderedBookings = [];
-      const orderedStops = [];
-      const seen = new Set();
-
-      for (const o of stopOrder) {
-        const t = String(o?.type || "");
-        const oid = String(o?.id || "");
-        if (!t || !oid) continue;
-        const key = `${t}:${oid}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        if (t === "booking" && bookMap.has(oid)) orderedBookings.push(bookMap.get(oid));
-        if (t === "subscription" && subMap.has(oid)) orderedStops.push(subMap.get(oid));
-      }
-
-      // append any new items not in the saved order
-      for (const b of bookings) if (!seen.has(`booking:${b.id}`)) orderedBookings.push(b);
-      for (const s of stops) if (!seen.has(`subscription:${s.id}`)) orderedStops.push(s);
-
-      // overwrite
-      bookings.length = 0;
-      bookings.push(...orderedBookings);
-      stops.length = 0;
-      stops.push(...orderedStops);
-    } else {
-      // default sort
-      bookings.sort((a, b) => String(a.postcode || "").localeCompare(String(b.postcode || "")));
-      stops.sort((a, b) => String(a.postcode || "").localeCompare(String(b.postcode || "")));
-    }
-
-    const totals = {
-      totalStops: stops.length,
-      totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
-      totalBookings: bookings.length,
-      totalCompletedBookings: bookings.reduce((sum, b) => sum + (b.completed ? 1 : 0), 0),
-    };
+    // Strip internal sort keys
+    const items = merged.map((x) => {
+      const copy = { ...x };
+      delete copy._sortPostcode;
+      delete copy._sortAddress;
+      return copy;
+    });
 
     return res.status(200).json({
       ok: true,
       staff: { id: staffRow.id, name: staffRow.name, email: staffRow.email, role: staffRow.role },
       run,
-      stops,
-      bookings,
-      totals,
+      items,
+      totals: { totalStops, totalExtraBags, totalBookings, totalCompletedBookings },
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to load driver run" });
