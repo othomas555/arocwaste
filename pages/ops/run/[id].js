@@ -6,6 +6,12 @@ function cx(...classes) {
   return classes.filter(Boolean).join(" ");
 }
 
+function moneyGBP(pence) {
+  const n = Number(pence);
+  if (!Number.isFinite(n)) return "—";
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n / 100);
+}
+
 async function readJsonOrText(res) {
   const ct = String(res.headers.get("content-type") || "").toLowerCase();
   const text = await res.text();
@@ -33,7 +39,13 @@ export default function OpsRunViewPage() {
   const [warning, setWarning] = useState("");
   const [run, setRun] = useState(null);
   const [stops, setStops] = useState([]);
-  const [totals, setTotals] = useState({ totalStops: 0, totalExtraBags: 0 });
+  const [bookings, setBookings] = useState([]);
+  const [totals, setTotals] = useState({
+    totalStops: 0,
+    totalExtraBags: 0,
+    totalBookings: 0,
+    totalCompletedBookings: 0,
+  });
 
   // staff assignment UI
   const [staffLoading, setStaffLoading] = useState(false);
@@ -64,7 +76,15 @@ export default function OpsRunViewPage() {
       const data = parsed.json || {};
       setRun(data.run || null);
       setStops(Array.isArray(data.stops) ? data.stops : []);
-      setTotals(data.totals || { totalStops: 0, totalExtraBags: 0 });
+      setBookings(Array.isArray(data.bookings) ? data.bookings : []);
+      setTotals(
+        data.totals || {
+          totalStops: 0,
+          totalExtraBags: 0,
+          totalBookings: 0,
+          totalCompletedBookings: 0,
+        }
+      );
       if (data.warning) setWarning(data.warning);
 
       // preselect assigned staff from run payload (daily_run_staff join)
@@ -75,7 +95,13 @@ export default function OpsRunViewPage() {
     } catch (e) {
       setRun(null);
       setStops([]);
-      setTotals({ totalStops: 0, totalExtraBags: 0 });
+      setBookings([]);
+      setTotals({
+        totalStops: 0,
+        totalExtraBags: 0,
+        totalBookings: 0,
+        totalCompletedBookings: 0,
+      });
       setError(e?.message || "Load failed");
     } finally {
       setLoading(false);
@@ -195,6 +221,28 @@ export default function OpsRunViewPage() {
     }
   }
 
+  async function setBookingCompleted(booking_id, completed) {
+    if (!run?.id) return;
+    setSavingId(`booking:${booking_id}`);
+    setError("");
+    try {
+      const res = await fetch("/api/ops/bookings/set-completed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ booking_id, completed, run_id: String(run.id) }),
+      });
+      const parsed = await readJsonOrText(res);
+      if (!res.ok) throw new Error(parsed?.json?.error || "Failed to update booking");
+      await load();
+    } catch (e) {
+      setError(e?.message || "Failed");
+    } finally {
+      setSavingId("");
+    }
+  }
+
+  const completedStops = useMemo(() => stops.filter((s) => !!s.collected).length, [stops]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-5xl px-3 py-4">
@@ -205,7 +253,10 @@ export default function OpsRunViewPage() {
           </div>
 
           <div className="flex gap-2">
-            <Link href="/ops/daily-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+            <Link
+              href="/ops/daily-runs"
+              className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm"
+            >
               Day Planner
             </Link>
             <Link href="/ops/today" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
@@ -264,7 +315,9 @@ export default function OpsRunViewPage() {
                     disabled={staffLoading}
                     className={cx(
                       "rounded-lg border px-3 py-2 text-sm font-semibold",
-                      staffLoading ? "border-slate-200 bg-slate-100 text-slate-500" : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+                      staffLoading
+                        ? "border-slate-200 bg-slate-100 text-slate-500"
+                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
                     )}
                   >
                     {staffLoading ? "Refreshing…" : "Refresh staff"}
@@ -321,10 +374,16 @@ export default function OpsRunViewPage() {
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Stops</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalStops}</div>
+                  <div className="text-xs text-slate-500">{completedStops} collected</div>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Extra bags</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalExtraBags}</div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
+                  <div className="text-xs font-semibold text-slate-600">One-off bookings</div>
+                  <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
+                  <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
                 </div>
               </div>
 
@@ -335,6 +394,123 @@ export default function OpsRunViewPage() {
               {run.notes ? <div className="mt-3 text-sm text-slate-600">{run.notes}</div> : null}
             </div>
 
+            {/* ONE-OFF BOOKINGS */}
+            <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-base font-semibold text-slate-900">One-off bookings</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    Bookings matching this run’s date + area + day + slot.
+                  </div>
+                </div>
+              </div>
+
+              {bookings.length === 0 ? (
+                <div className="mt-3 text-sm text-slate-700">No one-off bookings match this run.</div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {bookings.map((b) => {
+                    const isSaving = savingId === `booking:${b.id}`;
+                    const completed = !!b.completed_at;
+                    return (
+                      <div key={b.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-base font-semibold text-slate-900">
+                              {b.booking_ref || "Booking"}
+                              {completed ? (
+                                <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                                  completed
+                                </span>
+                              ) : (
+                                <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                  due
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
+
+                            <div className="mt-1 text-sm text-slate-600">
+                              {b.postcode}
+                              <span className="mx-2 text-slate-300">•</span>
+                              Slot:{" "}
+                              <span className="font-semibold text-slate-800">
+                                {String(b.route_slot || "ANY").toUpperCase()}
+                              </span>
+                              <span className="mx-2 text-slate-300">•</span>
+                              {moneyGBP(b.total_pence)}
+                              {b.payment_status ? (
+                                <>
+                                  <span className="mx-2 text-slate-300">•</span>
+                                  <span className="capitalize">{String(b.payment_status)}</span>
+                                </>
+                              ) : null}
+                            </div>
+
+                            {b.items_summary ? (
+                              <div className="mt-1 text-xs text-slate-600">Items: {b.items_summary}</div>
+                            ) : null}
+
+                            {b.notes ? <div className="mt-1 text-xs text-slate-600">Notes: {b.notes}</div> : null}
+
+                            <div className="mt-1 text-xs text-slate-600">
+                              {b.phone ? (
+                                <>
+                                  Phone: <span className="font-semibold text-slate-800">{b.phone}</span>
+                                </>
+                              ) : (
+                                <span className="text-slate-500">No phone</span>
+                              )}
+                            </div>
+
+                            {completed && b.completed_by_run_id ? (
+                              <div className="mt-1 text-xs text-slate-500">
+                                Completed for run: <span className="font-semibold">{b.completed_by_run_id}</span>
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="shrink-0 flex gap-2">
+                            {completed ? (
+                              <button
+                                type="button"
+                                onClick={() => setBookingCompleted(b.id, false)}
+                                disabled={isSaving}
+                                className={cx(
+                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                  isSaving
+                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                )}
+                              >
+                                Undo
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setBookingCompleted(b.id, true)}
+                                disabled={isSaving}
+                                className={cx(
+                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                  isSaving
+                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                )}
+                              >
+                                Completed
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* SUBSCRIPTION STOPS */}
             {stops.length === 0 ? (
               <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
                 <div className="text-sm text-slate-700">No due stops match this run.</div>
@@ -361,7 +537,10 @@ export default function OpsRunViewPage() {
                         <div className="mt-1 text-sm text-slate-600">
                           {s.postcode}
                           <span className="mx-2 text-slate-300">•</span>
-                          Slot: <span className="font-semibold text-slate-800">{String(s.route_slot || "ANY").toUpperCase()}</span>
+                          Slot:{" "}
+                          <span className="font-semibold text-slate-800">
+                            {String(s.route_slot || "ANY").toUpperCase()}
+                          </span>
                           <span className="mx-2 text-slate-300">•</span>
                           Extra bags: <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
                           <span className="mx-2 text-slate-300">•</span>
