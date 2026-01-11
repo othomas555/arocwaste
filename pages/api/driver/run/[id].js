@@ -7,16 +7,13 @@ function getBearerToken(req) {
 }
 
 function parseYMD(ymd) {
-  // ymd like "2026-01-10"
   const s = String(ymd || "").slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
   const [y, m, d] = s.split("-").map((x) => parseInt(x, 10));
-  // Use UTC to avoid timezone drift
   return new Date(Date.UTC(y, m - 1, d));
 }
 
 function daysBetweenUTC(a, b) {
-  // b - a in whole days
   const ms = b.getTime() - a.getTime();
   return Math.floor(ms / 86400000);
 }
@@ -33,13 +30,41 @@ function isDueOnDate(runDateYMD, anchorDateYMD, frequency) {
   const runDate = parseYMD(runDateYMD);
   const anchorDate = parseYMD(anchorDateYMD);
   const period = periodDaysForFrequency(frequency);
-
   if (!runDate || !anchorDate || !period) return false;
-
   const diff = daysBetweenUTC(anchorDate, runDate);
   if (diff < 0) return false;
-
   return diff % period === 0;
+}
+
+function normSlot(v) {
+  const s = String(v || "ANY").toUpperCase().trim();
+  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
+}
+
+function matchesRunSlot(runSlot, itemSlot) {
+  const r = normSlot(runSlot);
+  const raw = String(itemSlot ?? "").trim();
+  const s = raw ? normSlot(raw) : "BLANK";
+  if (r === "ANY") return true;
+  if (r === "AM") return s === "AM" || s === "ANY" || s === "BLANK";
+  if (r === "PM") return s === "PM" || s === "ANY" || s === "BLANK";
+  return true;
+}
+
+function safeItemsSummary(payload) {
+  try {
+    const items = payload?.items;
+    if (!Array.isArray(items) || items.length === 0) return "";
+    const titles = items
+      .map((x) => String(x?.title || "").trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (!titles.length) return "";
+    const suffix = items.length > titles.length ? ` + ${items.length - titles.length} more` : "";
+    return titles.join(", ") + suffix;
+  } catch {
+    return "";
+  }
 }
 
 export default async function handler(req, res) {
@@ -77,7 +102,6 @@ export default async function handler(req, res) {
     if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
     // 3) Confirm this staff member is assigned to this run
-    // IMPORTANT: join table column is run_id (NOT daily_run_id)
     const { data: linkRow, error: eLink } = await supabase
       .from("daily_run_staff")
       .select("run_id, staff_id")
@@ -110,10 +134,9 @@ export default async function handler(req, res) {
     if (eRun) return res.status(500).json({ error: eRun.message });
     if (!run) return res.status(404).json({ error: "Run not found" });
 
+    const runSlot = normSlot(run.route_slot);
+
     // 5) Load candidate subscriptions for this run area/day/slot
-    // Slot rules:
-    // - If run is ANY -> include all
-    // - If run is AM/PM -> include matching slot + ANY + blank
     let subsQuery = supabase
       .from("subscriptions")
       .select(
@@ -136,25 +159,22 @@ export default async function handler(req, res) {
       .eq("route_area", run.route_area)
       .eq("route_day", run.route_day);
 
-    const runSlot = String(run.route_slot || "ANY").toUpperCase();
+    // Keep the DB filter simple; exact slot rules are enforced in JS via matchesRunSlot
     if (runSlot !== "ANY") {
-      // include route_slot = runSlot OR ANY OR null/empty
-      subsQuery = subsQuery.in("route_slot", [runSlot, "ANY", "any", "", null]);
+      subsQuery = subsQuery.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
     }
 
     const { data: subs, error: eSubs } = await subsQuery;
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
     // 6) Filter due by anchor_date + frequency for this run date
-    const dueSubs = (subs || []).filter((s) =>
-      isDueOnDate(run.run_date, s.anchor_date, s.frequency)
-    );
+    const dueSubs = (subs || [])
+      .filter((s) => matchesRunSlot(runSlot, s.route_slot))
+      .filter((s) => isDueOnDate(run.run_date, s.anchor_date, s.frequency));
 
     const dueIds = dueSubs.map((s) => s.id);
 
     // 7) Collected flags for this run date
-    // NOTE: This assumes your existing collections table is named "subscription_collections"
-    // with columns: subscription_id, collected_date (you previously confirmed those headers).
     let collectedSet = new Set();
     if (dueIds.length) {
       const { data: collectedRows, error: eCollected } = await supabase
@@ -173,7 +193,7 @@ export default async function handler(req, res) {
     // 8) Shape stops payload expected by the driver page
     const stops = dueSubs
       .map((s) => ({
-        id: s.id, // the page uses this as "subscription_id" when marking collected
+        id: s.id, // subscription_id
         address: s.address || "",
         postcode: s.postcode || "",
         extra_bags: s.extra_bags || 0,
@@ -183,9 +203,63 @@ export default async function handler(req, res) {
       }))
       .sort((a, b) => String(a.postcode || "").localeCompare(String(b.postcode || "")));
 
+    // ----------------------------
+    // 9) BOOKINGS (new)
+    // ----------------------------
+    // Match by:
+    // - route_area == run.route_area
+    // - route_day == run.route_day (keeps consistent with ops)
+    // - service_date == run.run_date OR collection_date (text) == run.run_date
+    // - slot rules: ANY includes all; AM/PM include ANY + blank
+    let bq = supabase
+      .from("bookings")
+      .select(
+        "id, booking_ref, service_date, collection_date, route_area, route_day, route_slot, status, payment_status, name, phone, postcode, address, notes, total_pence, payload, completed_at, completed_by_run_id"
+      )
+      .eq("route_area", run.route_area)
+      .eq("route_day", run.route_day)
+      .or(`service_date.eq.${run.run_date},collection_date.eq.${run.run_date}`)
+      .neq("status", "cancelled");
+
+    if (runSlot !== "ANY") {
+      bq = bq.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
+    }
+
+    const { data: bookingsRaw, error: eBookings } = await bq
+      .order("postcode", { ascending: true })
+      .order("address", { ascending: true });
+
+    if (eBookings) {
+      return res.status(500).json({
+        error: eBookings.message,
+        hint:
+          "If this mentions missing columns completed_at/completed_by_run_id, add them to bookings (SQL migration).",
+      });
+    }
+
+    const bookings = (bookingsRaw || [])
+      .filter((b) => matchesRunSlot(runSlot, b.route_slot))
+      .map((b) => ({
+        id: b.id,
+        booking_ref: b.booking_ref,
+        route_slot: b.route_slot,
+        postcode: b.postcode || "",
+        address: b.address || "",
+        notes: b.notes || "",
+        phone: b.phone || "",
+        total_pence: b.total_pence,
+        payment_status: b.payment_status,
+        items_summary: safeItemsSummary(b.payload),
+        completed_at: b.completed_at,
+        completed_by_run_id: b.completed_by_run_id,
+        completed: !!b.completed_at,
+      }));
+
     const totals = {
       totalStops: stops.length,
       totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
+      totalBookings: bookings.length,
+      totalCompletedBookings: bookings.reduce((sum, b) => sum + (b.completed ? 1 : 0), 0),
     };
 
     return res.status(200).json({
@@ -193,6 +267,7 @@ export default async function handler(req, res) {
       staff: { id: staffRow.id, name: staffRow.name, email: staffRow.email, role: staffRow.role },
       run,
       stops,
+      bookings,
       totals,
     });
   } catch (e) {
