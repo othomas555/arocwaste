@@ -206,6 +206,32 @@ async function lookupRouteByPostcode(supabaseAdmin, postcodeStr) {
   };
 }
 
+// ------- Driver summary helpers (new) -------
+function toQtyTitle(qty, title) {
+  const t = String(title || "").trim();
+  if (!t) return "";
+  const n = Number(qty);
+  const q = Number.isFinite(n) && n > 1 ? Math.trunc(n) : 1;
+  return q > 1 ? `${q} × ${t}` : t;
+}
+
+function buildDriverSummaryFromBasket(cleanItems) {
+  const parts = [];
+  for (const it of cleanItems || []) {
+    const title = String(it?.title || "").trim();
+    if (!title) continue;
+    parts.push(toQtyTitle(it?.qty ?? 1, title));
+  }
+  if (!parts.length) return "One-off collection";
+  return parts.join(", ");
+}
+
+function buildDriverSummaryFromSingle(title, qty) {
+  const s = toQtyTitle(qty ?? 1, title);
+  return s || "One-off collection";
+}
+// ------------------------------------------
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -386,6 +412,7 @@ export default async function handler(req, res) {
       }
 
       const itemsSummary = buildItemsSummary(cleanItems);
+      const driverSummary = buildDriverSummaryFromBasket(cleanItems);
 
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
@@ -397,6 +424,7 @@ export default async function handler(req, res) {
           mode: "basket",
           item_count: String(cleanItems.length),
           items_summary: itemsSummary,
+          driver_summary: driverSummary,
           date: serviceDate,
           routeDay,
           routeArea,
@@ -421,6 +449,10 @@ export default async function handler(req, res) {
         const payload = {
           mode: "basket",
           items: cleanItems,
+
+          // ✅ driver-friendly text stored in payload (no schema change)
+          driver_summary: driverSummary,
+
           time: String(body.time ?? ""),
           timeAdd: Number(body.timeAdd ?? 0),
           remove: String(body.remove ?? ""),
@@ -486,6 +518,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing title" });
     }
 
+    const driverSummary = buildDriverSummaryFromSingle(title, qty);
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -509,6 +543,7 @@ export default async function handler(req, res) {
         mode: "single",
         title,
         qty: String(qty),
+        driver_summary: driverSummary,
         date: serviceDate,
         routeDay,
         routeArea,
@@ -532,6 +567,10 @@ export default async function handler(req, res) {
         mode: "single",
         title,
         qty,
+
+        // ✅ driver-friendly text stored in payload (no schema change)
+        driver_summary: driverSummary,
+
         base: Number(body.base ?? 0),
         time: String(body.time ?? ""),
         timeAdd: Number(body.timeAdd ?? 0),
