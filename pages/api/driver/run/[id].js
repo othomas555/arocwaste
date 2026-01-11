@@ -84,9 +84,13 @@ function toQtyTitle(qty, title) {
 }
 
 function buildBookingDescription(b) {
-  // Prefer payload items (basket mode)
   const payload = b?.payload || null;
 
+  // ✅ NEW: prefer payload.driver_summary (your backfill populates this)
+  const ds = String(payload?.driver_summary || "").trim();
+  if (ds) return ds;
+
+  // Basket mode: payload.items
   const items = payload?.items;
   if (Array.isArray(items) && items.length) {
     const parts = [];
@@ -99,13 +103,13 @@ function buildBookingDescription(b) {
     if (parts.length) return parts.join(", ");
   }
 
-  // Single mode payload: title + qty
+  // Single mode: payload.title + qty
   const pTitle = payload?.title;
   const pQty = payload?.qty;
   const single = toQtyTitle(pQty, pTitle);
   if (single) return single;
 
-  // Fallback to title column (often “Basket order”)
+  // Fallback to title column (avoid “Basket order”)
   const colTitle = String(b?.title || "").trim();
   if (colTitle && colTitle.toLowerCase() !== "basket order") return colTitle;
 
@@ -141,7 +145,6 @@ function applyStopOrder({ stopOrder, bookings, subs }) {
     }
   }
 
-  // Append anything not in stop_order
   for (const b of bookings || []) {
     const k = `b:${String(b.id)}`;
     if (!used.has(k)) out.push(b);
@@ -170,14 +173,12 @@ export default async function handler(req, res) {
   if (!runId) return res.status(400).json({ error: "Missing run id" });
 
   try {
-    // 1) Validate session -> email
     const { data: userData, error: userErr } = await supabase.auth.getUser(token);
     if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
 
     const email = String(userData.user.email || "").trim().toLowerCase();
     if (!email) return res.status(401).json({ error: "No email on session" });
 
-    // 2) Staff lookup
     const { data: staffRow, error: eStaff } = await supabase
       .from("staff")
       .select("id,name,email,role,active")
@@ -188,7 +189,6 @@ export default async function handler(req, res) {
     if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
     if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
-    // 3) Confirm staff assigned to this run
     const { data: linkRow, error: eLink } = await supabase
       .from("daily_run_staff")
       .select("run_id, staff_id")
@@ -199,7 +199,6 @@ export default async function handler(req, res) {
     if (eLink) return res.status(500).json({ error: eLink.message });
     if (!linkRow) return res.status(403).json({ error: "You are not assigned to this run" });
 
-    // 4) Load run (include stop_order)
     const { data: run, error: eRun } = await supabase
       .from("daily_runs")
       .select(
@@ -228,7 +227,7 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
-    // 5) Candidate subscriptions
+    // Subscriptions
     let subsQuery = supabase
       .from("subscriptions")
       .select(
@@ -258,7 +257,6 @@ export default async function handler(req, res) {
     const { data: subsRaw, error: eSubs } = await subsQuery;
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
-    // 6) Filter due subs
     const subsDue = [];
     const dueSubIds = [];
     for (const s of subsRaw || []) {
@@ -279,7 +277,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // 7) Collected flags
     let collectedSet = new Set();
     if (dueSubIds.length) {
       const { data: collectedRows, error: eCollected } = await supabase
@@ -309,7 +306,7 @@ export default async function handler(req, res) {
       _sortAddress: String(s.address || ""),
     }));
 
-    // 8) Bookings due for this run
+    // Bookings
     const { data: bookingRows, error: eBookings } = await supabase
       .from("bookings")
       .select(
@@ -376,7 +373,7 @@ export default async function handler(req, res) {
       _sortAddress: String(b.address || ""),
     }));
 
-    // 9) Merge + order
+    // Merge + order
     let merged = applyStopOrder({
       stopOrder: run.stop_order,
       bookings: bookingStops,
@@ -395,7 +392,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 10) Totals
     const totalStops = subsStops.length;
     const totalExtraBags = subsStops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0);
     const totalBookings = bookingStops.length;
