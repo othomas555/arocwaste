@@ -261,7 +261,7 @@ export default async function handler(req, res) {
 
     const routeArea = routeLookup.default.route_area;
     const routeDay = routeLookup.default.route_day;
-    const routeSlot = routeLookup.default.slot || "ANY";
+    const routeSlot = (routeLookup.default.slot || "ANY").toString().toUpperCase() || "ANY";
     const matchedPrefix = routeLookup.default.matched_prefix || "";
 
     // ---- BASKET MODE ----
@@ -337,7 +337,12 @@ export default async function handler(req, res) {
       // Small order service charge (server-enforced)
       const { thresholdPence, feePence } = getSmallOrderConfig();
       let serviceChargePence = 0;
-      if (feePence > 0 && thresholdPence > 0 && itemsSubtotalPence > 0 && itemsSubtotalPence < thresholdPence) {
+      if (
+        feePence > 0 &&
+        thresholdPence > 0 &&
+        itemsSubtotalPence > 0 &&
+        itemsSubtotalPence < thresholdPence
+      ) {
         serviceChargePence = feePence;
         lineItems.push({
           quantity: 1,
@@ -443,12 +448,15 @@ export default async function handler(req, res) {
               payment_status: "pending",
               status: "booked",
 
+              // ✅ ops-first column + legacy column kept in sync
               service_date: serviceDate,
+              collection_date: serviceDate,
+
               postcode: routeLookup.postcode || postcodeRaw,
               address,
               route_day: routeDay,
               route_area: routeArea,
-              route_slot: routeSlot,
+              route_slot: routeSlot || "ANY",
 
               title: "Basket order",
               name: String(body.name ?? ""),
@@ -547,12 +555,15 @@ export default async function handler(req, res) {
             payment_status: "pending",
             status: "booked",
 
+            // ✅ ops-first column + legacy column kept in sync
             service_date: serviceDate,
+            collection_date: serviceDate,
+
             postcode: routeLookup.postcode || postcodeRaw,
             address,
             route_day: routeDay,
             route_area: routeArea,
-            route_slot: routeSlot,
+            route_slot: routeSlot || "ANY",
 
             title,
             name: String(body.name ?? ""),
@@ -572,8 +583,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
-    const msg =
-      err?.raw?.message || err?.message || "Stripe session creation failed (unknown error)";
+    const msg = err?.raw?.message || err?.message || "Stripe session creation failed (unknown error)";
     console.error("Stripe error:", msg);
     return res.status(500).json({ error: msg });
   }
