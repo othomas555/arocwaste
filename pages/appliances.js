@@ -11,6 +11,46 @@ function formatGBP(amount) {
   }).format(amount);
 }
 
+function iconForApplianceSlug(slug) {
+  const s = String(slug || "").toLowerCase();
+
+  const map = {
+    // Core
+    "fridge-or-freezer": "🧊",
+    "american-fridge-freezer": "🧊",
+    "chest-freezer": "🧊",
+    cooker: "🍳",
+    "washing-machine": "🧺",
+    dishwasher: "🍽️",
+    "tumble-dryer": "🌀",
+    "tv-or-monitor": "📺",
+
+    // Generic size buckets
+    "small-kitchen-appliance": "🍞",
+    "medium-appliance": "🔌",
+    "large-appliance": "🏠",
+
+    // Small named items
+    kettle: "☕",
+    toaster: "🍞",
+    "air-fryer": "🍟",
+  };
+
+  if (map[s]) return map[s];
+
+  // Helpful fallbacks if you add new items later
+  if (s.includes("fridge") || s.includes("freezer")) return "🧊";
+  if (s.includes("wash")) return "🧺";
+  if (s.includes("dry")) return "🌀";
+  if (s.includes("dish")) return "🍽️";
+  if (s.includes("cook") || s.includes("oven") || s.includes("hob")) return "🍳";
+  if (s.includes("tv") || s.includes("monitor")) return "📺";
+  if (s.includes("kettle")) return "☕";
+  if (s.includes("toast")) return "🍞";
+
+  return "🔌";
+}
+
 export default function AppliancesPage() {
   const [items, setItems] = useState([]);
   const [loadErr, setLoadErr] = useState("");
@@ -94,6 +134,17 @@ export default function AppliancesPage() {
                     {loadErr}
                   </div>
                 ) : null}
+
+                <div className="mt-6 flex flex-wrap gap-2">
+                  {["One checkout", "Card payments", "Fast booking"].map((chip) => (
+                    <span
+                      key={chip}
+                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700"
+                    >
+                      {chip}
+                    </span>
+                  ))}
+                </div>
               </div>
 
               <div className="lg:col-span-5">
@@ -132,8 +183,8 @@ export default function AppliancesPage() {
                         className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
                       >
                         <div className="flex items-center gap-4">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-                            <span className="text-lg">⌁</span>
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-900">
+                            <span className="text-xl">{iconForApplianceSlug(item.slug)}</span>
                           </div>
                           <div>
                             <div className="text-sm font-semibold text-slate-900">{item.title}</div>
@@ -180,8 +231,8 @@ export default function AppliancesPage() {
                       <div key={item.slug} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                         <div className="flex items-start justify-between gap-4">
                           <div className="flex items-start gap-4">
-                            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-                              <span className="text-lg">⌁</span>
+                            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-900">
+                              <span className="text-xl">{iconForApplianceSlug(item.slug)}</span>
                             </div>
                             <div>
                               <div className="text-sm font-semibold text-slate-900">{item.title}</div>
