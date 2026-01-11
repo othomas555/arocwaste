@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import Layout from "../components/layout";
-import { furnitureItems } from "../data/furniture";
+import appliances, { appliances as appliancesList } from "../data/appliances";
 import { basketAdd } from "../utils/basket";
 
 function formatGBP(amount) {
@@ -12,43 +12,51 @@ function formatGBP(amount) {
   }).format(amount);
 }
 
-export default function FurniturePage() {
-  const items = Array.isArray(furnitureItems) ? furnitureItems : [];
+export default function AppliancesPage() {
+  const items = Array.isArray(appliancesList)
+    ? appliancesList
+    : Array.isArray(appliances)
+    ? appliances
+    : [];
+
   const popular = useMemo(() => items.filter((i) => i.popular), [items]);
   const all = items;
 
-  const [justAddedId, setJustAddedId] = useState("");
+  const [justAddedSlug, setJustAddedSlug] = useState("");
 
   function addItem(item) {
     basketAdd({
-      category: "furniture",
-      slug: item.id, // furniture uses id
+      category: "appliances",
+      slug: item.slug,
       title: item.title,
       unitPrice: Number(item.price) || 0,
       qty: 1,
     });
-    setJustAddedId(item.id);
-    setTimeout(() => setJustAddedId(""), 1200);
+    setJustAddedSlug(item.slug);
+    setTimeout(() => setJustAddedSlug(""), 1200);
   }
 
   return (
-    <Layout title="Furniture Collection | AROC Waste" description="Add furniture items to your basket and checkout once.">
+    <Layout
+      title="Appliance Collection | AROC Waste"
+      description="Add appliance items to your basket and checkout once."
+    >
       <div className="bg-white">
         <div className="mx-auto max-w-6xl px-4 py-10 sm:py-12">
           <div className="mb-8">
             <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700">
               <span className="text-slate-400">AROC Waste</span>
               <span className="text-slate-300">•</span>
-              <span>Furniture collections</span>
+              <span>Appliance collections</span>
             </div>
 
             <div className="mt-5 grid gap-6 lg:grid-cols-12 lg:items-start">
               <div className="lg:col-span-7">
                 <h1 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-                  Furniture collection, booked online.
+                  Appliance collection, booked online.
                 </h1>
                 <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-600">
-                  Add multiple items to your basket (sofa + armchair + microwave later) and checkout once.
+                  Add multiple items to your basket and checkout once.
                 </p>
 
                 <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -104,18 +112,18 @@ export default function FurniturePage() {
                 <>
                   <div className="mb-5">
                     <h2 className="text-xl font-semibold text-slate-900">Popular items</h2>
-                    <p className="mt-1 text-sm text-slate-600">Common furniture removals.</p>
+                    <p className="mt-1 text-sm text-slate-600">Common appliance removals.</p>
                   </div>
 
                   <div className="grid gap-4 sm:grid-cols-2">
                     {popular.map((item) => (
                       <div
-                        key={item.id}
+                        key={item.slug}
                         className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
                       >
                         <div className="flex items-center gap-4">
                           <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-                            <span className="text-lg">▦</span>
+                            <span className="text-lg">⌁</span>
                           </div>
                           <div>
                             <div className="text-sm font-semibold text-slate-900">{item.title}</div>
@@ -139,7 +147,7 @@ export default function FurniturePage() {
                             onClick={() => addItem(item)}
                             className="inline-flex items-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
                           >
-                            {justAddedId === item.id ? "Added ✓" : "Add to basket"}
+                            {justAddedSlug === item.slug ? "Added ✓" : "Add to basket"}
                           </button>
                         </div>
                       </div>
@@ -149,7 +157,7 @@ export default function FurniturePage() {
               )}
 
               <div className={popular.length > 0 ? "mt-12" : ""} id="items">
-                <h2 className="text-xl font-semibold text-slate-900">All furniture items</h2>
+                <h2 className="text-xl font-semibold text-slate-900">All appliance items</h2>
                 <p className="mt-1 text-sm text-slate-600">
                   Add as many as you like, then checkout once.
                 </p>
@@ -157,18 +165,20 @@ export default function FurniturePage() {
                 <div className="mt-5 grid gap-4 sm:grid-cols-2">
                   {all.map((item) => (
                     <div
-                      key={item.id}
+                      key={item.slug}
                       className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex items-start gap-4">
                           <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-                            <span className="text-lg">▦</span>
+                            <span className="text-lg">⌁</span>
                           </div>
                           <div>
                             <div className="text-sm font-semibold text-slate-900">{item.title}</div>
                             <div className="mt-0.5 text-xs text-slate-600">{item.subtitle}</div>
-                            <div className="mt-3 text-xs text-slate-500">Add to basket and checkout once</div>
+                            <div className="mt-3 text-xs text-slate-500">
+                              Add to basket and checkout once
+                            </div>
                           </div>
                         </div>
 
@@ -183,7 +193,7 @@ export default function FurniturePage() {
                             onClick={() => addItem(item)}
                             className="inline-flex items-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
                           >
-                            {justAddedId === item.id ? "Added ✓" : "Add to basket"}
+                            {justAddedSlug === item.slug ? "Added ✓" : "Add to basket"}
                           </button>
                         </div>
                       </div>
