@@ -55,6 +55,12 @@ export default function OpsRunViewPage() {
   const [savingStaff, setSavingStaff] = useState(false);
   const [staffSavedMsg, setStaffSavedMsg] = useState("");
 
+  // route ordering UI (Google)
+  const [origin, setOrigin] = useState("");
+  const [optLoading, setOptLoading] = useState(false);
+  const [optMsg, setOptMsg] = useState("");
+  const [optErr, setOptErr] = useState("");
+
   async function load() {
     if (!id) return;
     setLoading(true);
@@ -131,10 +137,31 @@ export default function OpsRunViewPage() {
   }, [id]);
 
   useEffect(() => {
-    // load staff once we have a run id
     if (id) loadStaff();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Persist origin locally so ops only types once
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const k = "aroc_ops_route_origin";
+      const v = window.localStorage.getItem(k) || "";
+      if (v && !origin) setOrigin(v);
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("aroc_ops_route_origin", String(origin || ""));
+    } catch {
+      // ignore
+    }
+  }, [origin]);
 
   const staffNames = useMemo(() => {
     if (!run?.daily_run_staff) return "";
@@ -175,7 +202,7 @@ export default function OpsRunViewPage() {
       if (!res.ok) throw new Error(parsed?.json?.error || "Failed to save assignments");
 
       setStaffSavedMsg("Saved.");
-      await load(); // refresh run header (names)
+      await load();
     } catch (e) {
       setStaffError(e?.message || "Failed to save assignments");
     } finally {
@@ -241,7 +268,49 @@ export default function OpsRunViewPage() {
     }
   }
 
+  async function optimizeOrder() {
+    if (!run?.id) return;
+    setOptErr("");
+    setOptMsg("");
+    setOptLoading(true);
+    try {
+      const o = String(origin || "").trim();
+      if (!o) throw new Error("Please enter an origin / depot address (with postcode).");
+
+      const res = await fetch(`/api/ops/run/${run.id}/optimize-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: o }),
+      });
+
+      const parsed = await readJsonOrText(res);
+      if (!res.ok) throw new Error(parsed?.json?.error || "Failed to optimize order");
+
+      const truncated = !!parsed?.json?.truncated;
+      setOptMsg(truncated ? "Order saved (truncated due to Google waypoint limit)." : "Order saved.");
+      await load();
+    } catch (e) {
+      setOptErr(e?.message || "Failed to optimize order");
+    } finally {
+      setOptLoading(false);
+    }
+  }
+
   const completedStops = useMemo(() => stops.filter((s) => !!s.collected).length, [stops]);
+
+  // For visual numbering across bookings + subscriptions (in their current order)
+  const bookingOrderIndex = useMemo(() => {
+    const m = new Map();
+    (bookings || []).forEach((b, i) => m.set(String(b.id), i + 1));
+    return m;
+  }, [bookings]);
+
+  const subOrderIndex = useMemo(() => {
+    const offset = (bookings || []).length;
+    const m = new Map();
+    (stops || []).forEach((s, i) => m.set(String(s.id), offset + i + 1));
+    return m;
+  }, [bookings, stops]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -259,7 +328,10 @@ export default function OpsRunViewPage() {
             >
               Day Planner
             </Link>
-            <Link href="/ops/today" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+            <Link
+              href="/ops/today"
+              className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm"
+            >
               Today
             </Link>
           </div>
@@ -297,6 +369,67 @@ export default function OpsRunViewPage() {
                 <span className="font-medium text-slate-700">{vehicleLabel}</span>
                 <span className="mx-2 text-slate-300">•</span>
                 <span>{staffNames || "No staff assigned"}</span>
+              </div>
+
+              {/* ROUTE ORDERING (GOOGLE) */}
+              <div className="mt-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Route ordering (Google)</div>
+                    <div className="mt-1 text-xs text-slate-600">
+                      Enter a depot/origin address with postcode, then save an optimized stop order to this run.
+                      Drivers will see the same order.
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={optimizeOrder}
+                    disabled={optLoading}
+                    className={cx(
+                      "rounded-lg px-4 py-2 text-sm font-semibold",
+                      optLoading ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black"
+                    )}
+                  >
+                    {optLoading ? "Optimizing…" : "Optimize order"}
+                  </button>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+                  <div className="md:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700">Origin / depot address</label>
+                    <input
+                      value={origin}
+                      onChange={(e) => {
+                        setOptErr("");
+                        setOptMsg("");
+                        setOrigin(e.target.value);
+                      }}
+                      placeholder="e.g. Cox Skips & Waste Management, Newport, NPxx xxx"
+                      className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                    />
+                    <div className="mt-1 text-xs text-slate-500">
+                      Tip: include postcode for best results. Google has a waypoint limit (~23).
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold text-slate-700">Status</div>
+                    {optErr ? (
+                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                        {optErr}
+                      </div>
+                    ) : optMsg ? (
+                      <div className="mt-1 rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">
+                        {optMsg}
+                      </div>
+                    ) : (
+                      <div className="mt-1 rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-600">
+                        Not run yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* ASSIGNMENT */}
@@ -412,11 +545,13 @@ export default function OpsRunViewPage() {
                   {bookings.map((b) => {
                     const isSaving = savingId === `booking:${b.id}`;
                     const completed = !!b.completed_at;
+                    const idx = bookingOrderIndex.get(String(b.id)) || 0;
                     return (
                       <div key={b.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="text-base font-semibold text-slate-900">
+                              {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
                               {b.booking_ref || "Booking"}
                               {completed ? (
                                 <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
@@ -517,73 +652,78 @@ export default function OpsRunViewPage() {
               </div>
             ) : (
               <div className="space-y-2 pb-10">
-                {stops.map((s) => (
-                  <div key={s.id} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-base font-semibold text-slate-900">
-                          {s.address}
+                {stops.map((s) => {
+                  const idx = subOrderIndex.get(String(s.id)) || 0;
+                  return (
+                    <div key={s.id} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-base font-semibold text-slate-900">
+                            {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
+                            {s.address}
+                            {s.collected ? (
+                              <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                                collected
+                              </span>
+                            ) : (
+                              <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                due
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-1 text-sm text-slate-600">
+                            {s.postcode}
+                            <span className="mx-2 text-slate-300">•</span>
+                            Slot:{" "}
+                            <span className="font-semibold text-slate-800">
+                              {String(s.route_slot || "ANY").toUpperCase()}
+                            </span>
+                            <span className="mx-2 text-slate-300">•</span>
+                            Extra bags:{" "}
+                            <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
+                            <span className="mx-2 text-slate-300">•</span>
+                            {s.use_own_bin ? "Own bin" : "Company bin"}
+                          </div>
+
+                          {s.ops_notes ? <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div> : null}
+                        </div>
+
+                        <div className="shrink-0 flex gap-2">
                           {s.collected ? (
-                            <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                              collected
-                            </span>
+                            <button
+                              type="button"
+                              onClick={() => undoCollected(s.id)}
+                              disabled={savingId === s.id}
+                              className={cx(
+                                "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                savingId === s.id
+                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                  : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                              )}
+                            >
+                              Undo
+                            </button>
                           ) : (
-                            <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                              due
-                            </span>
+                            <button
+                              type="button"
+                              onClick={() => markCollected(s.id)}
+                              disabled={savingId === s.id}
+                              className={cx(
+                                "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                                savingId === s.id
+                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                  : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                              )}
+                            >
+                              Collected
+                            </button>
                           )}
                         </div>
-
-                        <div className="mt-1 text-sm text-slate-600">
-                          {s.postcode}
-                          <span className="mx-2 text-slate-300">•</span>
-                          Slot:{" "}
-                          <span className="font-semibold text-slate-800">
-                            {String(s.route_slot || "ANY").toUpperCase()}
-                          </span>
-                          <span className="mx-2 text-slate-300">•</span>
-                          Extra bags: <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
-                          <span className="mx-2 text-slate-300">•</span>
-                          {s.use_own_bin ? "Own bin" : "Company bin"}
-                        </div>
-
-                        {s.ops_notes ? <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div> : null}
-                      </div>
-
-                      <div className="shrink-0 flex gap-2">
-                        {s.collected ? (
-                          <button
-                            type="button"
-                            onClick={() => undoCollected(s.id)}
-                            disabled={savingId === s.id}
-                            className={cx(
-                              "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingId === s.id
-                                ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
-                            )}
-                          >
-                            Undo
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => markCollected(s.id)}
-                            disabled={savingId === s.id}
-                            className={cx(
-                              "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingId === s.id
-                                ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
-                            )}
-                          >
-                            Collected
-                          </button>
-                        )}
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </>
