@@ -68,6 +68,22 @@ function matchesRunSlot(runSlot, subSlot) {
   return true;
 }
 
+function safeItemsSummary(payload) {
+  try {
+    const items = payload?.items;
+    if (!Array.isArray(items) || items.length === 0) return "";
+    const titles = items
+      .map((x) => String(x?.title || "").trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (!titles.length) return "";
+    const suffix = items.length > titles.length ? ` + ${items.length - titles.length} more` : "";
+    return titles.join(", ") + suffix;
+  } catch {
+    return "";
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
@@ -105,6 +121,9 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
+    // ----------------------------
+    // SUBSCRIPTIONS (existing logic)
+    // ----------------------------
     let q = supabase
       .from("subscriptions")
       .select(
@@ -166,9 +185,81 @@ export default async function handler(req, res) {
       collected: !!collectedMap.get(s.id),
     }));
 
+    // ----------------------------
+    // BOOKINGS (new)
+    // ----------------------------
+    // We match bookings to this run by:
+    // - route_area == run.route_area
+    // - route_day == run.route_day (optional but keeps consistent)
+    // - date match: service_date == run.run_date OR collection_date (text) == run.run_date
+    // - slot rules (AM/PM/ANY/blank) like subs
+    //
+    // We keep it simple: exclude obvious cancelled; include booked; allow paid/pending.
+    let bq = supabase
+      .from("bookings")
+      .select(
+        "id, booking_ref, service_date, collection_date, route_area, route_day, route_slot, status, payment_status, name, email, phone, postcode, address, notes, total_pence, payload, completed_at, completed_by_run_id"
+      )
+      .eq("route_area", run.route_area)
+      .eq("route_day", run.route_day);
+
+    // Date filter: OR service_date = run_date OR collection_date (text) = run_date
+    bq = bq.or(`service_date.eq.${run.run_date},collection_date.eq.${run.run_date}`);
+
+    // Status filter: keep it conservative and ops-friendly
+    // (If you have other statuses, we can tweak once we see real values.)
+    bq = bq.neq("status", "cancelled");
+
+    if (runSlot !== "ANY") {
+      bq = bq.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
+    }
+
+    const { data: bookingsRaw, error: eBookings } = await bq
+      .order("postcode", { ascending: true })
+      .order("address", { ascending: true });
+
+    if (eBookings) {
+      // This will commonly happen if completed_at / completed_by_run_id don’t exist yet.
+      return res.status(500).json({
+        error: eBookings.message,
+        hint:
+          "If this mentions missing columns like completed_at/completed_by_run_id, run the SQL migration I provided to add them.",
+      });
+    }
+
+    const bookingsDue = (bookingsRaw || [])
+      .filter((b) => matchesRunSlot(runSlot, b.route_slot))
+      .map((b) => ({
+        id: b.id,
+        booking_ref: b.booking_ref,
+        service_date: b.service_date,
+        collection_date: b.collection_date,
+        route_area: b.route_area,
+        route_day: b.route_day,
+        route_slot: b.route_slot,
+        status: b.status,
+        payment_status: b.payment_status,
+        name: b.name,
+        email: b.email,
+        phone: b.phone,
+        postcode: b.postcode,
+        address: b.address,
+        notes: b.notes,
+        total_pence: b.total_pence,
+        items_summary: safeItemsSummary(b.payload),
+        payload: b.payload, // keep for UI drill-down if needed
+        completed_at: b.completed_at,
+        completed_by_run_id: b.completed_by_run_id,
+        completed: !!b.completed_at,
+      }));
+
     const totals = {
       totalStops: stops.length,
       totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
+
+      // new
+      totalBookings: bookingsDue.length,
+      totalCompletedBookings: bookingsDue.reduce((sum, b) => sum + (b.completed ? 1 : 0), 0),
     };
 
     let warning = "";
@@ -176,7 +267,13 @@ export default async function handler(req, res) {
       warning = `Warning: ${missingAnchors} active subscriber(s) in this area/day have no anchor_date so they could not be scheduled.`;
     }
 
-    return res.status(200).json({ run, stops, totals, warning });
+    return res.status(200).json({
+      run,
+      stops,
+      bookings: bookingsDue,
+      totals,
+      warning,
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to load run" });
   }
