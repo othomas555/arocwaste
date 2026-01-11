@@ -1,405 +1,303 @@
-import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { supabaseClient } from "../../../lib/supabaseClient";
+import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
-function cx(...xs) {
-  return xs.filter(Boolean).join(" ");
+function getBearerToken(req) {
+  const h = req.headers.authorization || "";
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
 }
 
-function moneyGBP(pence) {
-  const n = Number(pence);
-  if (!Number.isFinite(n)) return "—";
-  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n / 100);
+function parseYMD(ymd) {
+  const s = String(ymd || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const [y, m, d] = s.split("-").map((x) => parseInt(x, 10));
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
-export default function DriverRunPage() {
-  const router = useRouter();
-  const { id } = router.query;
+function daysBetweenUTC(a, b) {
+  const ms = b.getTime() - a.getTime();
+  return Math.floor(ms / 86400000);
+}
 
-  const [session, setSession] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [savingKey, setSavingKey] = useState("");
-  const [error, setError] = useState("");
+function periodDaysForFrequency(freq) {
+  const f = String(freq || "").toLowerCase();
+  if (f === "weekly") return 7;
+  if (f === "fortnightly") return 14;
+  if (f === "threeweekly") return 21;
+  return null;
+}
 
-  const [run, setRun] = useState(null);
-  const [stops, setStops] = useState([]);
-  const [bookings, setBookings] = useState([]);
-  const [totals, setTotals] = useState({
-    totalStops: 0,
-    totalExtraBags: 0,
-    totalBookings: 0,
-    totalCompletedBookings: 0,
-  });
+function isDueOnDate(runDateYMD, anchorDateYMD, frequency) {
+  const runDate = parseYMD(runDateYMD);
+  const anchorDate = parseYMD(anchorDateYMD);
+  const period = periodDaysForFrequency(frequency);
+  if (!runDate || !anchorDate || !period) return false;
+  const diff = daysBetweenUTC(anchorDate, runDate);
+  if (diff < 0) return false;
+  return diff % period === 0;
+}
 
-  useEffect(() => {
-    let mounted = true;
-    async function init() {
-      if (!supabaseClient) return;
-      const { data } = await supabaseClient.auth.getSession();
-      if (!mounted) return;
-      setSession(data?.session || null);
+function normSlot(v) {
+  const s = String(v || "ANY").toUpperCase().trim();
+  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
+}
+
+function matchesRunSlot(runSlot, itemSlot) {
+  const r = normSlot(runSlot);
+  const raw = String(itemSlot ?? "").trim();
+  const s = raw ? normSlot(raw) : "BLANK";
+  if (r === "ANY") return true;
+  if (r === "AM") return s === "AM" || s === "ANY" || s === "BLANK";
+  if (r === "PM") return s === "PM" || s === "ANY" || s === "BLANK";
+  return true;
+}
+
+function safeItems(payload) {
+  try {
+    const items = payload?.items;
+    if (!Array.isArray(items)) return [];
+    return items
+      .map((x) => ({
+        title: String(x?.title || "").trim(),
+        qty: Number(x?.qty || x?.quantity || 1) || 1,
+      }))
+      .filter((x) => x.title);
+  } catch {
+    return [];
+  }
+}
+
+function safeItemsSummary(payload) {
+  const items = safeItems(payload);
+  if (!items.length) return "";
+  const parts = items.slice(0, 3).map((x) => `${x.title}${x.qty > 1 ? ` ×${x.qty}` : ""}`);
+  const suffix = items.length > 3 ? ` + ${items.length - 3} more` : "";
+  return parts.join(", ") + suffix;
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "GET") {
+    res.setHeader("Allow", "GET");
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
+
+  const token = getBearerToken(req);
+  if (!token) return res.status(401).json({ error: "Missing bearer token" });
+
+  const runId = String(req.query.id || "").trim();
+  if (!runId) return res.status(400).json({ error: "Missing run id" });
+
+  try {
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Invalid session" });
+
+    const email = String(userData.user.email || "").trim().toLowerCase();
+    if (!email) return res.status(401).json({ error: "No email on session" });
+
+    const { data: staffRow, error: eStaff } = await supabase
+      .from("staff")
+      .select("id,name,email,role,active")
+      .ilike("email", email)
+      .maybeSingle();
+
+    if (eStaff) return res.status(500).json({ error: eStaff.message });
+    if (!staffRow) return res.status(403).json({ error: "No staff record for this email" });
+    if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
+
+    const { data: linkRow, error: eLink } = await supabase
+      .from("daily_run_staff")
+      .select("run_id, staff_id")
+      .eq("run_id", runId)
+      .eq("staff_id", staffRow.id)
+      .maybeSingle();
+
+    if (eLink) return res.status(500).json({ error: eLink.message });
+    if (!linkRow) return res.status(403).json({ error: "You are not assigned to this run" });
+
+    const { data: run, error: eRun } = await supabase
+      .from("daily_runs")
+      .select(
+        `
+        id,
+        run_date,
+        route_day,
+        route_area,
+        route_slot,
+        vehicle_id,
+        notes,
+        created_at,
+        stop_order,
+        vehicles:vehicles(id, registration, name)
+      `
+      )
+      .eq("id", runId)
+      .maybeSingle();
+
+    if (eRun) return res.status(500).json({ error: eRun.message });
+    if (!run) return res.status(404).json({ error: "Run not found" });
+
+    const runSlot = normSlot(run.route_slot);
+
+    // --- SUBSCRIPTIONS (unchanged, with slot rules enforced in JS)
+    let subsQuery = supabase
+      .from("subscriptions")
+      .select(
+        `
+        id,
+        address,
+        postcode,
+        extra_bags,
+        use_own_bin,
+        ops_notes,
+        status,
+        route_area,
+        route_day,
+        route_slot,
+        frequency,
+        anchor_date
+      `
+      )
+      .eq("status", "active")
+      .eq("route_area", run.route_area)
+      .eq("route_day", run.route_day);
+
+    if (runSlot !== "ANY") {
+      subsQuery = subsQuery.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
     }
-    init();
-    const { data: sub } = supabaseClient.auth.onAuthStateChange((_event, s) => setSession(s));
-    return () => {
-      mounted = false;
-      sub?.subscription?.unsubscribe?.();
+
+    const { data: subs, error: eSubs } = await subsQuery;
+    if (eSubs) return res.status(500).json({ error: eSubs.message });
+
+    const dueSubs = (subs || [])
+      .filter((s) => matchesRunSlot(runSlot, s.route_slot))
+      .filter((s) => isDueOnDate(run.run_date, s.anchor_date, s.frequency));
+
+    const dueIds = dueSubs.map((s) => s.id);
+
+    let collectedSet = new Set();
+    if (dueIds.length) {
+      const { data: collectedRows, error: eCollected } = await supabase
+        .from("subscription_collections")
+        .select("subscription_id")
+        .eq("collected_date", run.run_date)
+        .in("subscription_id", dueIds);
+
+      if (eCollected) return res.status(500).json({ error: eCollected.message });
+      for (const r of collectedRows || []) if (r?.subscription_id) collectedSet.add(r.subscription_id);
+    }
+
+    const stops = dueSubs.map((s) => ({
+      type: "subscription",
+      id: s.id,
+      address: s.address || "",
+      postcode: s.postcode || "",
+      extra_bags: s.extra_bags || 0,
+      use_own_bin: !!s.use_own_bin,
+      ops_notes: s.ops_notes || "",
+      collected: collectedSet.has(s.id),
+    }));
+
+    // --- BOOKINGS (expanded details)
+    let bq = supabase
+      .from("bookings")
+      .select(
+        "id, booking_ref, service_date, collection_date, route_area, route_day, route_slot, status, payment_status, name, email, phone, postcode, address, notes, total_pence, payload, completed_at, completed_by_run_id"
+      )
+      .eq("route_area", run.route_area)
+      .eq("route_day", run.route_day)
+      .or(`service_date.eq.${run.run_date},collection_date.eq.${run.run_date}`)
+      .neq("status", "cancelled");
+
+    if (runSlot !== "ANY") {
+      bq = bq.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
+    }
+
+    const { data: bookingsRaw, error: eBookings } = await bq;
+    if (eBookings) {
+      return res.status(500).json({
+        error: eBookings.message,
+        hint:
+          "If this mentions missing columns (stop_order/completed_at/etc.) run the SQL migrations.",
+      });
+    }
+
+    const bookings = (bookingsRaw || [])
+      .filter((b) => matchesRunSlot(runSlot, b.route_slot))
+      .map((b) => ({
+        type: "booking",
+        id: b.id,
+        booking_ref: b.booking_ref,
+        route_slot: b.route_slot,
+        postcode: b.postcode || "",
+        address: b.address || "",
+        notes: b.notes || "",
+        name: b.name || "",
+        email: b.email || "",
+        phone: b.phone || "",
+        total_pence: b.total_pence,
+        payment_status: b.payment_status,
+        items: safeItems(b.payload),
+        items_summary: safeItemsSummary(b.payload),
+        completed_at: b.completed_at,
+        completed_by_run_id: b.completed_by_run_id,
+        completed: !!b.completed_at,
+      }));
+
+    // --- Apply saved run order (stop_order) if present
+    // stop_order should be an array like: [{type:"booking", id:"..."}, {type:"subscription", id:"..."}]
+    const stopOrder = Array.isArray(run.stop_order) ? run.stop_order : [];
+    if (stopOrder.length) {
+      const subMap = new Map(stops.map((x) => [x.id, x]));
+      const bookMap = new Map(bookings.map((x) => [x.id, x]));
+      const orderedBookings = [];
+      const orderedStops = [];
+      const seen = new Set();
+
+      for (const o of stopOrder) {
+        const t = String(o?.type || "");
+        const oid = String(o?.id || "");
+        if (!t || !oid) continue;
+        const key = `${t}:${oid}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        if (t === "booking" && bookMap.has(oid)) orderedBookings.push(bookMap.get(oid));
+        if (t === "subscription" && subMap.has(oid)) orderedStops.push(subMap.get(oid));
+      }
+
+      // append any new items not in the saved order
+      for (const b of bookings) if (!seen.has(`booking:${b.id}`)) orderedBookings.push(b);
+      for (const s of stops) if (!seen.has(`subscription:${s.id}`)) orderedStops.push(s);
+
+      // overwrite
+      bookings.length = 0;
+      bookings.push(...orderedBookings);
+      stops.length = 0;
+      stops.push(...orderedStops);
+    } else {
+      // default sort
+      bookings.sort((a, b) => String(a.postcode || "").localeCompare(String(b.postcode || "")));
+      stops.sort((a, b) => String(a.postcode || "").localeCompare(String(b.postcode || "")));
+    }
+
+    const totals = {
+      totalStops: stops.length,
+      totalExtraBags: stops.reduce((sum, s) => sum + (Number(s.extra_bags) || 0), 0),
+      totalBookings: bookings.length,
+      totalCompletedBookings: bookings.reduce((sum, b) => sum + (b.completed ? 1 : 0), 0),
     };
-  }, []);
 
-  async function load() {
-    if (!id) return;
-    setError("");
-    setLoading(true);
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
-      const res = await fetch(`/api/driver/run/${id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to load run");
-
-      setRun(json.run || null);
-      setStops(Array.isArray(json.stops) ? json.stops : []);
-      setBookings(Array.isArray(json.bookings) ? json.bookings : []);
-      setTotals(
-        json.totals || { totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalCompletedBookings: 0 }
-      );
-    } catch (e) {
-      setError(e?.message || "Load failed");
-    } finally {
-      setLoading(false);
-    }
+    return res.status(200).json({
+      ok: true,
+      staff: { id: staffRow.id, name: staffRow.name, email: staffRow.email, role: staffRow.role },
+      run,
+      stops,
+      bookings,
+      totals,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Failed to load driver run" });
   }
-
-  useEffect(() => {
-    if (session?.access_token && id) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.access_token, id]);
-
-  const vehicleLabel = useMemo(() => {
-    if (!run?.vehicles) return "— no vehicle —";
-    return `${run.vehicles.registration}${run.vehicles.name ? ` • ${run.vehicles.name}` : ""}`;
-  }, [run]);
-
-  async function markCollected(subscription_id) {
-    setSavingKey(subscription_id);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
-      const res = await fetch("/api/driver/mark-collected", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          run_id: run?.id,
-          subscription_id,
-          collected_date: run?.run_date,
-        }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to mark collected");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to mark collected");
-    } finally {
-      setSavingKey("");
-    }
-  }
-
-  async function undoCollected(subscription_id) {
-    setSavingKey(subscription_id);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
-      const res = await fetch("/api/driver/undo-collected", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          run_id: run?.id,
-          subscription_id,
-          collected_date: run?.run_date,
-        }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to undo");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to undo");
-    } finally {
-      setSavingKey("");
-    }
-  }
-
-  async function setBookingCompleted(booking_id, completed) {
-    setSavingKey(`booking:${booking_id}`);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
-      const res = await fetch("/api/driver/bookings/set-completed", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ booking_id, completed, run_id: run?.id }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to update booking");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to update booking");
-    } finally {
-      setSavingKey("");
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-4xl px-4 py-6">
-        <div className="mb-4 flex items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold text-slate-900">Driver • Run</h1>
-            <p className="text-sm text-slate-600">Tick off collections as you go.</p>
-          </div>
-          <div className="flex gap-2">
-            <Link href="/driver/my-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
-              My runs
-            </Link>
-          </div>
-        </div>
-
-        {error ? (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
-        ) : null}
-
-        {!session?.access_token ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-            You’re not logged in. Go to{" "}
-            <Link className="underline font-semibold" href="/driver/login">
-              /driver/login
-            </Link>
-            .
-          </div>
-        ) : loading ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-            Loading…
-          </div>
-        ) : !run ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-            Run not found.
-          </div>
-        ) : (
-          <>
-            <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="text-base font-semibold text-slate-900">
-                {run.route_area} • {run.route_day} • {String(run.route_slot || "ANY").toUpperCase()}
-              </div>
-              <div className="mt-1 text-sm text-slate-600">
-                <span className="font-medium text-slate-700">{run.run_date}</span>
-                <span className="mx-2 text-slate-300">•</span>
-                <span className="font-medium text-slate-700">{vehicleLabel}</span>
-              </div>
-
-              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="text-xs font-semibold text-slate-600">Stops</div>
-                  <div className="text-lg font-semibold text-slate-900">{totals.totalStops}</div>
-                </div>
-                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="text-xs font-semibold text-slate-600">Extra bags</div>
-                  <div className="text-lg font-semibold text-slate-900">{totals.totalExtraBags}</div>
-                </div>
-                <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="text-xs font-semibold text-slate-600">One-off bookings</div>
-                  <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
-                  <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
-                </div>
-              </div>
-            </div>
-
-            {/* ONE-OFF BOOKINGS */}
-            <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="text-base font-semibold text-slate-900">One-off bookings</div>
-              <div className="mt-1 text-sm text-slate-600">Jobs due for this run.</div>
-
-              {bookings.length === 0 ? (
-                <div className="mt-3 text-sm text-slate-700">No one-off bookings for this run.</div>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {bookings.map((b) => {
-                    const completed = !!b.completed_at;
-                    const isSaving = savingKey === `booking:${b.id}`;
-                    return (
-                      <div key={b.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-base font-semibold text-slate-900">
-                              {b.booking_ref || "Booking"}
-                              {completed ? (
-                                <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                                  completed
-                                </span>
-                              ) : (
-                                <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                                  due
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
-
-                            <div className="mt-1 text-sm text-slate-600">
-                              {b.postcode}
-                              <span className="mx-2 text-slate-300">•</span>
-                              {moneyGBP(b.total_pence)}
-                              <span className="mx-2 text-slate-300">•</span>
-                              Slot:{" "}
-                              <span className="font-semibold text-slate-800">
-                                {String(b.route_slot || "ANY").toUpperCase()}
-                              </span>
-                            </div>
-
-                            {b.items_summary ? (
-                              <div className="mt-1 text-xs text-slate-600">Items: {b.items_summary}</div>
-                            ) : null}
-
-                            {b.notes ? <div className="mt-1 text-xs text-slate-600">Notes: {b.notes}</div> : null}
-
-                            <div className="mt-1 text-xs text-slate-600">
-                              {b.phone ? (
-                                <>
-                                  Phone: <span className="font-semibold text-slate-800">{b.phone}</span>
-                                </>
-                              ) : (
-                                <span className="text-slate-500">No phone</span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="shrink-0 flex gap-2">
-                            {completed ? (
-                              <button
-                                type="button"
-                                onClick={() => setBookingCompleted(b.id, false)}
-                                disabled={isSaving}
-                                className={cx(
-                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
-                                )}
-                              >
-                                Undo
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setBookingCompleted(b.id, true)}
-                                disabled={isSaving}
-                                className={cx(
-                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
-                                )}
-                              >
-                                Completed
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* SUBSCRIPTION STOPS */}
-            {stops.length === 0 ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-                No subscription stops due for this run.
-              </div>
-            ) : (
-              <div className="space-y-2 pb-10">
-                {stops.map((s) => (
-                  <div key={s.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-base font-semibold text-slate-900">
-                          {s.address}
-                          {s.collected ? (
-                            <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                              collected
-                            </span>
-                          ) : (
-                            <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                              due
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-1 text-sm text-slate-600">
-                          {s.postcode}
-                          <span className="mx-2 text-slate-300">•</span>
-                          Extra bags: <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
-                          <span className="mx-2 text-slate-300">•</span>
-                          {s.use_own_bin ? "Own bin" : "Company bin"}
-                        </div>
-                        {s.ops_notes ? <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div> : null}
-                      </div>
-
-                      <div className="shrink-0 flex gap-2">
-                        {s.collected ? (
-                          <button
-                            type="button"
-                            onClick={() => undoCollected(s.id)}
-                            disabled={savingKey === s.id}
-                            className={cx(
-                              "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingKey === s.id
-                                ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
-                            )}
-                          >
-                            Undo
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => markCollected(s.id)}
-                            disabled={savingKey === s.id}
-                            className={cx(
-                              "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                              savingKey === s.id
-                                ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
-                            )}
-                          >
-                            Collected
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
 }
