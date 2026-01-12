@@ -19,10 +19,6 @@ export default async function handler(req, res) {
     if (!issue_id) return res.status(400).json({ error: "Missing issue_id" });
     if (!resolution_action) return res.status(400).json({ error: "Add an action note before closing." });
 
-    // Optional: if you want to record which staff member closed it,
-    // we need your ops auth model. For now, we close without staff id.
-    // (We can upgrade to staff-id tracking once you confirm how ops auth is enforced.)
-
     const { error } = await supabase
       .from("run_stop_issues")
       .update({
