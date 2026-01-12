@@ -20,10 +20,7 @@ function cleanText(s) {
 function buildNavDestination(item) {
   const addr = cleanText(item?.address);
   const pc = cleanText(item?.postcode);
-
-  // If backend ever provides it, prefer it (future-proof, no harm)
   const apiDest = cleanText(item?.nav_destination);
-
   const dest = apiDest || [addr, pc].filter(Boolean).join(", ");
   return dest || "";
 }
@@ -31,10 +28,19 @@ function buildNavDestination(item) {
 function googleMapsNavUrl(destination) {
   const dest = cleanText(destination);
   if (!dest) return "";
-  // Google Maps "Directions" URL. Works on mobile (app) + desktop.
-  // dir_action=navigate encourages navigation mode on mobile.
   return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving&dir_action=navigate`;
 }
+
+const ISSUE_REASONS = [
+  "No access",
+  "Bin not out / customer missed",
+  "Contaminated / not acceptable",
+  "Overweight / too many bags",
+  "Wrong address",
+  "Customer asked to skip",
+  "Vehicle / time constraint",
+  "Other",
+];
 
 export default function DriverRunPage() {
   const router = useRouter();
@@ -46,13 +52,17 @@ export default function DriverRunPage() {
   const [error, setError] = useState("");
 
   const [run, setRun] = useState(null);
-  const [items, setItems] = useState([]); // merged ordered stops (bookings + subscriptions)
+  const [items, setItems] = useState([]);
   const [totals, setTotals] = useState({
     totalStops: 0,
     totalExtraBags: 0,
     totalBookings: 0,
     totalCompletedBookings: 0,
   });
+
+  // per-stop issue input state
+  const [issueReasonByKey, setIssueReasonByKey] = useState({});
+  const [issueDetailsByKey, setIssueDetailsByKey] = useState({});
 
   useEffect(() => {
     let mounted = true;
@@ -199,16 +209,104 @@ export default function DriverRunPage() {
     }
   }
 
+  async function reportIssue(item) {
+    const token = session?.access_token;
+    if (!token) {
+      setError("Not logged in.");
+      return;
+    }
+
+    const stop_type = item?.type;
+    const stop_id = String(item?.id || "");
+    const key = `${stop_type}:${stop_id}`;
+
+    const reason = cleanText(issueReasonByKey[key]) || cleanText(item?.issue_reason);
+    const details = cleanText(issueDetailsByKey[key]);
+
+    if (!reason) {
+      setError("Select an issue reason first.");
+      return;
+    }
+
+    setSavingKey(`issue:${key}`);
+    setError("");
+    try {
+      const res = await fetch("/api/driver/stops/set-issue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          run_id: run?.id,
+          stop_type,
+          stop_id,
+          reason,
+          details,
+        }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to report issue");
+
+      // clear local details field after save
+      setIssueDetailsByKey((prev) => ({ ...prev, [key]: "" }));
+      await load();
+    } catch (e) {
+      setError(e?.message || "Failed to report issue");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
+  async function clearIssue(item) {
+    const token = session?.access_token;
+    if (!token) {
+      setError("Not logged in.");
+      return;
+    }
+
+    const stop_type = item?.type;
+    const stop_id = String(item?.id || "");
+    const key = `${stop_type}:${stop_id}`;
+
+    setSavingKey(`issue:${key}`);
+    setError("");
+    try {
+      const res = await fetch("/api/driver/stops/clear-issue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          run_id: run?.id,
+          stop_type,
+          stop_id,
+        }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "Failed to clear issue");
+
+      await load();
+    } catch (e) {
+      setError(e?.message || "Failed to clear issue");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
   function isCompleted(item) {
     const isBooking = item?.type === "booking";
     return isBooking ? !!item?.completed_at : !!item?.collected;
   }
 
+  function hasIssue(item) {
+    return !!cleanText(item?.issue_reason);
+  }
+
   function cardTone(item) {
     const booking = item?.type === "booking";
     const done = isCompleted(item);
+    const issue = hasIssue(item);
 
     if (done) return "bg-white border-slate-200";
+    if (issue) return "bg-amber-50 border-amber-200";
     if (booking) return "bg-blue-50 border-blue-200";
     return "bg-red-50 border-red-200";
   }
@@ -232,7 +330,6 @@ export default function DriverRunPage() {
   }
 
   function stopTitle(item) {
-    // Make address the headline for drivers
     const addr = cleanText(item?.address);
     const pc = cleanText(item?.postcode);
     if (!addr && !pc) return "Stop";
@@ -248,7 +345,6 @@ export default function DriverRunPage() {
       return desc || "One-off collection";
     }
 
-    // subscription
     const extra = Number(item?.extra_bags) || 0;
     const own = item?.use_own_bin ? "Own bin" : "Company bin";
     if (extra > 0) return `Empty wheelie bin (+ ${extra} extra bag${extra === 1 ? "" : "s"}) • ${own}`;
@@ -288,7 +384,6 @@ export default function DriverRunPage() {
           <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">Run not found.</div>
         ) : (
           <>
-            {/* HEADER */}
             <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">
                 {run.route_area} • {run.route_day} • {String(run.route_slot || "ANY").toUpperCase()}
@@ -320,11 +415,10 @@ export default function DriverRunPage() {
               </div>
             </div>
 
-            {/* LEGEND */}
             <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">Run sheet</div>
               <div className="mt-1 text-sm text-slate-600">
-                Red = wheelie bin collections. Blue = one-off jobs. Completed stops turn grey.
+                Red = wheelie bin collections. Blue = one-off jobs. Amber = issue flagged. Completed stops turn grey.
               </div>
             </div>
 
@@ -352,11 +446,18 @@ export default function DriverRunPage() {
                   const navUrl = googleMapsNavUrl(navDest);
                   const navDisabled = !navUrl;
 
+                  const issueReason = cleanText(it.issue_reason);
+                  const issueDetails = cleanText(it.issue_details);
+
+                  const localReason = issueReasonByKey[key] ?? "";
+                  const localDetails = issueDetailsByKey[key] ?? "";
+
+                  const issueSaving = savingKey === `issue:${key}`;
+
                   return (
                     <div key={key} className={cx("rounded-2xl border p-4 shadow-sm", cardTone(it))}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          {/* top row */}
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-slate-500 font-semibold">{idx + 1}.</span>
 
@@ -368,6 +469,12 @@ export default function DriverRunPage() {
                               {done ? "COMPLETED" : "DUE"}
                             </span>
 
+                            {issueReason ? (
+                              <span className="rounded-full bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white ring-1 ring-amber-700">
+                                ISSUE
+                              </span>
+                            ) : null}
+
                             {booking && it.booking_ref ? (
                               <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
                                 {it.booking_ref}
@@ -375,10 +482,8 @@ export default function DriverRunPage() {
                             ) : null}
                           </div>
 
-                          {/* headline */}
                           <div className="mt-2 text-base font-semibold text-slate-900">{headline}</div>
 
-                          {/* job line */}
                           <div className="mt-1 text-sm text-slate-800">
                             <span className="font-semibold">Job:</span> {jobLine}
                             {booking && it.total_pence != null ? (
@@ -389,7 +494,20 @@ export default function DriverRunPage() {
                             ) : null}
                           </div>
 
-                          {/* details */}
+                          {issueReason ? (
+                            <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-amber-200">
+                              <div className="text-xs text-amber-900">
+                                <span className="font-semibold">Issue:</span> {issueReason}
+                                {issueDetails ? (
+                                  <>
+                                    <span className="mx-2 text-amber-300">•</span>
+                                    <span className="text-amber-900">{issueDetails}</span>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : null}
+
                           {booking ? (
                             <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
                               <div className="text-xs text-slate-700">
@@ -431,11 +549,79 @@ export default function DriverRunPage() {
                               </div>
                             </div>
                           ) : null}
+
+                          {/* Issue reporter (only when not completed) */}
+                          {!done ? (
+                            <div className="mt-3 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
+                              <div className="text-xs font-semibold text-slate-800">Problem / can’t collect</div>
+                              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                                <div className="md:col-span-1">
+                                  <label className="block text-[11px] font-semibold text-slate-600">Reason</label>
+                                  <select
+                                    value={localReason || ""}
+                                    onChange={(e) =>
+                                      setIssueReasonByKey((prev) => ({ ...prev, [key]: e.target.value }))
+                                    }
+                                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
+                                  >
+                                    <option value="">Select…</option>
+                                    {ISSUE_REASONS.map((r) => (
+                                      <option key={r} value={r}>
+                                        {r}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+
+                                <div className="md:col-span-2">
+                                  <label className="block text-[11px] font-semibold text-slate-600">Details (optional)</label>
+                                  <input
+                                    value={localDetails}
+                                    onChange={(e) =>
+                                      setIssueDetailsByKey((prev) => ({ ...prev, [key]: e.target.value }))
+                                    }
+                                    placeholder="Quick note (gate locked, bin missing, etc.)"
+                                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="mt-2 flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => reportIssue(it)}
+                                  disabled={issueSaving}
+                                  className={cx(
+                                    "rounded-lg px-3 py-2 text-sm font-semibold ring-1",
+                                    issueSaving
+                                      ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                      : "bg-amber-600 text-white ring-amber-700 hover:bg-amber-700"
+                                  )}
+                                >
+                                  {issueSaving ? "Saving…" : "Report issue"}
+                                </button>
+
+                                {issueReason ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => clearIssue(it)}
+                                    disabled={issueSaving}
+                                    className={cx(
+                                      "rounded-lg px-3 py-2 text-sm font-semibold ring-1",
+                                      issueSaving
+                                        ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                        : "bg-white text-slate-900 ring-slate-200 hover:bg-slate-50"
+                                    )}
+                                  >
+                                    Clear
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
 
-                        {/* buttons */}
                         <div className="shrink-0 flex flex-col gap-2">
-                          {/* Navigate */}
                           {navDisabled ? (
                             <button
                               type="button"
@@ -456,7 +642,6 @@ export default function DriverRunPage() {
                             </a>
                           )}
 
-                          {/* Complete / Undo */}
                           {booking ? (
                             done ? (
                               <button
