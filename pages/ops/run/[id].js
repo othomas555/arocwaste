@@ -141,7 +141,7 @@ export default function OpsRunViewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Persist origin locally so ops only types once
+  // Persist origin locally so ops only types once (optional)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -274,13 +274,13 @@ export default function OpsRunViewPage() {
     setOptMsg("");
     setOptLoading(true);
     try {
+      // ✅ origin is OPTIONAL now (one-click). If blank, API uses first+last stop as anchors.
       const o = String(origin || "").trim();
-      if (!o) throw new Error("Please enter an origin / depot address (with postcode).");
 
       const res = await fetch(`/api/ops/run/${run.id}/optimize-order`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin: o }),
+        body: JSON.stringify(o ? { origin: o } : {}),
       });
 
       const parsed = await readJsonOrText(res);
@@ -377,8 +377,10 @@ export default function OpsRunViewPage() {
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Route ordering (Google)</div>
                     <div className="mt-1 text-xs text-slate-600">
-                      Enter a depot/origin address with postcode, then save an optimized stop order to this run.
-                      Drivers will see the same order.
+                      One click saves an optimized stop_order to this run. Drivers will see the same order.
+                      <span className="block mt-1">
+                        Optional: enter a depot/origin address (with postcode) to optimize as a round-trip from the yard.
+                      </span>
                     </div>
                   </div>
 
@@ -391,13 +393,15 @@ export default function OpsRunViewPage() {
                       optLoading ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black"
                     )}
                   >
-                    {optLoading ? "Optimizing…" : "Optimize order"}
+                    {optLoading ? "Optimizing…" : "Optimise order"}
                   </button>
                 </div>
 
                 <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
                   <div className="md:col-span-2">
-                    <label className="block text-xs font-semibold text-slate-700">Origin / depot address</label>
+                    <label className="block text-xs font-semibold text-slate-700">
+                      Optional: Origin / depot address
+                    </label>
                     <input
                       value={origin}
                       onChange={(e) => {
@@ -409,7 +413,7 @@ export default function OpsRunViewPage() {
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
                     />
                     <div className="mt-1 text-xs text-slate-500">
-                      Tip: include postcode for best results. Google has a waypoint limit (~23).
+                      Leave blank for one-click (first + last stop used as anchors). Google has a waypoint limit (~23).
                     </div>
                   </div>
 
