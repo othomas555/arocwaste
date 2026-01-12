@@ -21,6 +21,7 @@ export default function OpsDashboard({
   todayDate,
   billingIssueCount,
   subscriberCount,
+  openOpsIssueCount,
 }) {
   const cards = [
     {
@@ -48,6 +49,24 @@ export default function OpsDashboard({
         </span>
       ),
     },
+
+    // ✅ NEW: Issues inbox + badge
+    {
+      title: "Issues",
+      desc: "Problems raised by drivers. Add action notes, close, and track outcomes.",
+      href: "/ops/issues",
+      right: (
+        <span
+          className={classNames(
+            "rounded-md px-2 py-1 text-xs font-semibold",
+            openOpsIssueCount > 0 ? "bg-red-600 text-white" : "bg-emerald-100 text-emerald-800"
+          )}
+        >
+          {openOpsIssueCount || 0} open
+        </span>
+      ),
+    },
+
     {
       title: "Today list",
       desc: "Due today + mark collected/undo (writes to subscription_collections).",
@@ -69,7 +88,7 @@ export default function OpsDashboard({
       href: "/ops/route-assign",
     },
 
-    // ✅ NEW: catalogue editor
+    // ✅ catalogue editor
     {
       title: "Catalogue",
       desc: "Edit furniture + appliances items and prices (public pages update immediately).",
@@ -112,6 +131,19 @@ export default function OpsDashboard({
             >
               Open Subscribers
             </Link>
+
+            <Link
+              href="/ops/issues"
+              className={classNames(
+                "rounded-lg px-3 py-2 text-sm font-semibold",
+                (openOpsIssueCount || 0) > 0
+                  ? "bg-red-600 text-white hover:bg-red-700"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700"
+              )}
+            >
+              Issues {openOpsIssueCount > 0 ? `(${openOpsIssueCount})` : ""}
+            </Link>
+
             <Link
               href="/ops/billing"
               className={classNames(
@@ -135,6 +167,22 @@ export default function OpsDashboard({
           </div>
 
           <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div className="text-xs font-semibold text-gray-500">Issues to resolve</div>
+            <div className="mt-1 flex items-center gap-2">
+              <div className="text-2xl font-semibold text-gray-900">{openOpsIssueCount || 0}</div>
+              <span
+                className={classNames(
+                  "rounded-md px-2 py-1 text-xs font-semibold",
+                  (openOpsIssueCount || 0) > 0 ? "bg-red-100 text-red-800" : "bg-emerald-100 text-emerald-800"
+                )}
+              >
+                {(openOpsIssueCount || 0) > 0 ? "Needs attention" : "All clear"}
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-gray-600">Driver-reported problems</div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="text-xs font-semibold text-gray-500">Billing issues</div>
             <div className="mt-1 flex items-center gap-2">
               <div className="text-2xl font-semibold text-gray-900">{billingIssueCount}</div>
@@ -150,14 +198,6 @@ export default function OpsDashboard({
             <div className="mt-1 text-xs text-gray-600">
               Anything not marked <span className="font-mono">ok</span>
             </div>
-          </div>
-
-          <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold text-gray-500">Next</div>
-            <div className="mt-1 text-sm font-semibold text-gray-900">
-              Run planning → stop ordering → return-to-yard markers
-            </div>
-            <div className="mt-1 text-xs text-gray-600">We’ll keep it simple and ops-first.</div>
           </div>
         </div>
 
@@ -200,6 +240,9 @@ export default function OpsDashboard({
               If routes change, update <span className="font-mono">/ops/routes</span> then use{" "}
               <span className="font-mono">/ops/route-assign</span> to apply to existing customers.
             </li>
+            <li>
+              Driver issues land in <span className="font-mono">/ops/issues</span> — add an action note, then close.
+            </li>
           </ul>
         </div>
       </div>
@@ -214,7 +257,12 @@ export async function getServerSideProps(ctx) {
 
   const todayDate = new Date().toISOString().slice(0, 10);
 
-  // Pull subscriptions through your ops API (keeps auth consistent and avoids importing admin client in pages)
+  // Defaults
+  let billingIssueCount = 0;
+  let subscriberCount = 0;
+  let openOpsIssueCount = 0;
+
+  // 1) Subscriber + billing audit counts (existing behaviour)
   try {
     const res = await fetch(`${baseUrl}/api/ops/subscriptions?limit=500`, {
       headers: {
@@ -224,38 +272,43 @@ export async function getServerSideProps(ctx) {
     });
 
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        props: {
-          todayDate,
-          billingIssueCount: 0,
-          subscriberCount: 0,
-        },
-      };
+    if (res.ok) {
+      const subs = Array.isArray(json.data) ? json.data : [];
+      const activeLike = new Set(["active", "pending", "paused"]);
+      const filtered = subs.filter((s) => activeLike.has(String(s.status || "").toLowerCase()));
+
+      subscriberCount = filtered.length;
+      billingIssueCount = filtered.filter(
+        (s) => String(s.billing_alignment_status || "unknown") !== "ok"
+      ).length;
     }
-
-    const subs = Array.isArray(json.data) ? json.data : [];
-    const activeLike = new Set(["active", "pending", "paused"]);
-    const filtered = subs.filter((s) => activeLike.has(String(s.status || "").toLowerCase()));
-
-    const billingIssueCount = filtered.filter(
-      (s) => String(s.billing_alignment_status || "unknown") !== "ok"
-    ).length;
-
-    return {
-      props: {
-        todayDate,
-        billingIssueCount,
-        subscriberCount: filtered.length,
-      },
-    };
   } catch {
-    return {
-      props: {
-        todayDate,
-        billingIssueCount: 0,
-        subscriberCount: 0,
-      },
-    };
+    // keep defaults
   }
+
+  // 2) Open ops issue count (NEW)
+  try {
+    const res = await fetch(`${baseUrl}/api/ops/issues/count-open`, {
+      headers: {
+        authorization: ctx.req.headers.authorization || "",
+        cookie: ctx.req.headers.cookie || "",
+      },
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (res.ok) {
+      openOpsIssueCount = Number(json.open_count) || 0;
+    }
+  } catch {
+    // keep default
+  }
+
+  return {
+    props: {
+      todayDate,
+      billingIssueCount,
+      subscriberCount,
+      openOpsIssueCount,
+    },
+  };
 }
