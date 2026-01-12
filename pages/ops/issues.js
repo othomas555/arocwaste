@@ -1,3 +1,4 @@
+// pages/ops/issues.js
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
@@ -85,7 +86,6 @@ export default function OpsIssuesPage() {
       const parsed = await readJsonOrText(res);
       if (!res.ok) throw new Error(parsed?.json?.error || "Failed to close issue");
 
-      // clear local inputs and reload
       setActionById((prev) => ({ ...prev, [id]: "" }));
       setOutcomeById((prev) => ({ ...prev, [id]: "" }));
       await load();
@@ -108,6 +108,9 @@ export default function OpsIssuesPage() {
           </div>
 
           <div className="flex gap-2">
+            <Link href="/ops/dashboard" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
+              Dashboard
+            </Link>
             <Link href="/ops/daily-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
               Day Planner
             </Link>
@@ -165,19 +168,18 @@ export default function OpsIssuesPage() {
           <div className="space-y-2 pb-10">
             {issues.map((x) => {
               const isClosed = !!x.resolved_at;
-              const stopType = clean(x.stop_type);
+              const stopType = clean(x.stop_type).toLowerCase();
               const stop = x.stop || null;
 
               const run = x.run || null;
-              const runLabel = run ? `${run.run_date} • ${run.route_area} • ${run.route_day} • ${String(run.route_slot || "ANY").toUpperCase()}` : "—";
+              const runLabel = run
+                ? `${run.run_date} • ${run.route_area} • ${run.route_day} • ${String(run.route_slot || "ANY").toUpperCase()}`
+                : "—";
 
               const addr = clean(stop?.address);
               const pc = clean(stop?.postcode);
 
-              const title =
-                stopType === "booking"
-                  ? clean(stop?.booking_ref) || "Booking"
-                  : "Subscription";
+              const title = stopType === "booking" ? clean(stop?.booking_ref) || "Booking" : "Subscription";
 
               const closing = closingId === x.id;
 
@@ -186,7 +188,14 @@ export default function OpsIssuesPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className={cx("rounded-full px-2 py-1 text-[11px] font-extrabold ring-1", stopType === "booking" ? "bg-blue-100 text-blue-900 ring-blue-200" : "bg-red-100 text-red-900 ring-red-200")}>
+                        <span
+                          className={cx(
+                            "rounded-full px-2 py-1 text-[11px] font-extrabold ring-1",
+                            stopType === "booking"
+                              ? "bg-blue-100 text-blue-900 ring-blue-200"
+                              : "bg-red-100 text-red-900 ring-red-200"
+                          )}
+                        >
                           {stopType === "booking" ? "ONE-OFF" : "WHEELIE BIN"}
                         </span>
 
@@ -204,7 +213,10 @@ export default function OpsIssuesPage() {
 
                         <Link
                           href={run ? `/ops/run/${run.id}` : "#"}
-                          className={cx("text-xs font-semibold underline", run ? "text-slate-700" : "text-slate-400 pointer-events-none")}
+                          className={cx(
+                            "text-xs font-semibold underline",
+                            run ? "text-slate-700" : "text-slate-400 pointer-events-none"
+                          )}
                         >
                           View run
                         </Link>
