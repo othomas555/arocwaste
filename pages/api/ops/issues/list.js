@@ -50,7 +50,6 @@ export default async function handler(req, res) {
 
     const rows = issues || [];
 
-    // Fetch stop details in batches
     const bookingIds = uniq(rows.filter((r) => r.stop_type === "booking").map((r) => r.stop_id));
     const subIds = uniq(rows.filter((r) => r.stop_type === "subscription").map((r) => r.stop_id));
 
@@ -60,6 +59,7 @@ export default async function handler(req, res) {
         .from("bookings")
         .select("id, booking_ref, address, postcode, name, phone, email, notes, total_pence, payload")
         .in("id", bookingIds);
+
       if (eB) return res.status(500).json({ error: eB.message });
       bookingMap = new Map((bs || []).map((b) => [String(b.id), b]));
     }
@@ -70,6 +70,7 @@ export default async function handler(req, res) {
         .from("subscriptions")
         .select("id, address, postcode, extra_bags, use_own_bin, ops_notes")
         .in("id", subIds);
+
       if (eS) return res.status(500).json({ error: eS.message });
       subMap = new Map((ss || []).map((s) => [String(s.id), s]));
     }
@@ -78,11 +79,7 @@ export default async function handler(req, res) {
       const t = String(r.stop_type || "").toLowerCase();
       const sid = String(r.stop_id || "");
       const stop = t === "booking" ? bookingMap.get(sid) : subMap.get(sid);
-
-      return {
-        ...r,
-        stop: stop || null,
-      };
+      return { ...r, stop: stop || null };
     });
 
     return res.status(200).json({ ok: true, issues: hydrated });
