@@ -13,6 +13,10 @@ function moneyGBP(pence) {
   return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(n / 100);
 }
 
+function cleanText(s) {
+  return String(s || "").trim();
+}
+
 export default function DriverRunPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -24,7 +28,12 @@ export default function DriverRunPage() {
 
   const [run, setRun] = useState(null);
   const [items, setItems] = useState([]); // merged ordered stops (bookings + subscriptions)
-  const [totals, setTotals] = useState({ totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalCompletedBookings: 0 });
+  const [totals, setTotals] = useState({
+    totalStops: 0,
+    totalExtraBags: 0,
+    totalBookings: 0,
+    totalCompletedBookings: 0,
+  });
 
   useEffect(() => {
     let mounted = true;
@@ -59,7 +68,14 @@ export default function DriverRunPage() {
 
       setRun(json.run || null);
       setItems(Array.isArray(json.items) ? json.items : []);
-      setTotals(json.totals || { totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalCompletedBookings: 0 });
+      setTotals(
+        json.totals || {
+          totalStops: 0,
+          totalExtraBags: 0,
+          totalBookings: 0,
+          totalCompletedBookings: 0,
+        }
+      );
     } catch (e) {
       setError(e?.message || "Load failed");
       setRun(null);
@@ -164,22 +180,60 @@ export default function DriverRunPage() {
     }
   }
 
-  function cardTone(item) {
+  function isCompleted(item) {
     const isBooking = item?.type === "booking";
-    const isCompleted = isBooking ? !!item?.completed_at : !!item?.collected;
-
-    if (isCompleted) return "bg-white border-slate-200"; // grey/neutral (your current)
-    if (isBooking) return "bg-blue-50 border-blue-200"; // blue for one-off
-    return "bg-red-50 border-red-200"; // red for wheelie bin
+    return isBooking ? !!item?.completed_at : !!item?.collected;
   }
 
-  function badgeTone(item) {
-    const isBooking = item?.type === "booking";
-    const isCompleted = isBooking ? !!item?.completed_at : !!item?.collected;
+  function cardTone(item) {
+    const booking = item?.type === "booking";
+    const done = isCompleted(item);
 
-    if (isCompleted) return "bg-slate-100 text-slate-700 ring-slate-200";
-    if (isBooking) return "bg-blue-100 text-blue-900 ring-blue-200";
+    if (done) return "bg-white border-slate-200";
+    if (booking) return "bg-blue-50 border-blue-200";
+    return "bg-red-50 border-red-200";
+  }
+
+  function typePill(item) {
+    const booking = item?.type === "booking";
+    const done = isCompleted(item);
+
+    if (done) return "bg-slate-100 text-slate-700 ring-slate-200";
+    if (booking) return "bg-blue-100 text-blue-900 ring-blue-200";
     return "bg-red-100 text-red-900 ring-red-200";
+  }
+
+  function statusPill(item) {
+    const booking = item?.type === "booking";
+    const done = isCompleted(item);
+
+    if (done) return "bg-slate-100 text-slate-700 ring-slate-200";
+    if (booking) return "bg-blue-600 text-white ring-blue-700";
+    return "bg-emerald-600 text-white ring-emerald-700";
+  }
+
+  function stopTitle(item) {
+    // Make address the headline for drivers
+    const addr = cleanText(item?.address);
+    const pc = cleanText(item?.postcode);
+    if (!addr && !pc) return "Stop";
+    if (addr && pc) return `${addr} • ${pc}`;
+    return addr || pc;
+  }
+
+  function stopJobLine(item) {
+    const booking = item?.type === "booking";
+
+    if (booking) {
+      const desc = cleanText(item?.description);
+      return desc || "One-off collection";
+    }
+
+    // subscription
+    const extra = Number(item?.extra_bags) || 0;
+    const own = item?.use_own_bin ? "Own bin" : "Company bin";
+    if (extra > 0) return `Empty wheelie bin (+ ${extra} extra bag${extra === 1 ? "" : "s"}) • ${own}`;
+    return `Empty wheelie bin • ${own}`;
   }
 
   return (
@@ -210,15 +264,12 @@ export default function DriverRunPage() {
             .
           </div>
         ) : loading ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-            Loading…
-          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">Loading…</div>
         ) : !run ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">
-            Run not found.
-          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">Run not found.</div>
         ) : (
           <>
+            {/* HEADER */}
             <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">
                 {run.route_area} • {run.route_day} • {String(run.route_slot || "ANY").toUpperCase()}
@@ -250,10 +301,11 @@ export default function DriverRunPage() {
               </div>
             </div>
 
+            {/* LEGEND */}
             <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="text-base font-semibold text-slate-900">Run stops</div>
+              <div className="text-base font-semibold text-slate-900">Run sheet</div>
               <div className="mt-1 text-sm text-slate-600">
-                Red = wheelie bin. Blue = one-off. Completed stops turn grey.
+                Red = wheelie bin collections. Blue = one-off jobs. Completed stops turn grey.
               </div>
             </div>
 
@@ -264,85 +316,104 @@ export default function DriverRunPage() {
             ) : (
               <div className="space-y-2 pb-10">
                 {items.map((it, idx) => {
-                  const isBooking = it.type === "booking";
-                  const isCompleted = isBooking ? !!it.completed_at : !!it.collected;
+                  const booking = it.type === "booking";
+                  const done = isCompleted(it);
+                  const key = `${it.type}:${it.id}`;
 
-                  const title = isBooking ? (it.booking_ref || "One-off booking") : "Empty wheelie bin";
-                  const description = isBooking ? (it.description || it.items_summary || "") : "Empty wheelie bin";
+                  const headline = stopTitle(it);
+                  const jobLine = stopJobLine(it);
+
+                  const customer = cleanText(it.customer_name);
+                  const phone = cleanText(it.phone);
+                  const email = cleanText(it.email);
+                  const notes = cleanText(it.notes);
+                  const opsNotes = cleanText(it.ops_notes);
 
                   return (
-                    <div key={`${it.type}:${it.id}`} className={cx("rounded-2xl border p-4 shadow-sm", cardTone(it))}>
+                    <div key={key} className={cx("rounded-2xl border p-4 shadow-sm", cardTone(it))}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="text-base font-semibold text-slate-900">
-                            <span className="mr-2 text-slate-500">{idx + 1}.</span>
-                            {title}{" "}
-                            <span className={cx("ml-2 rounded-full px-2 py-1 text-xs font-semibold ring-1", badgeTone(it))}>
-                              {isCompleted ? "completed" : "due"}
+                          {/* top row */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-slate-500 font-semibold">{idx + 1}.</span>
+
+                            <span className={cx("rounded-full px-2 py-1 text-[11px] font-extrabold tracking-wide ring-1", typePill(it))}>
+                              {booking ? "ONE-OFF" : "WHEELIE BIN"}
                             </span>
+
+                            <span className={cx("rounded-full px-2 py-1 text-[11px] font-semibold ring-1", statusPill(it))}>
+                              {done ? "COMPLETED" : "DUE"}
+                            </span>
+
+                            {booking && it.booking_ref ? (
+                              <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
+                                {it.booking_ref}
+                              </span>
+                            ) : null}
                           </div>
 
+                          {/* headline */}
+                          <div className="mt-2 text-base font-semibold text-slate-900">{headline}</div>
+
+                          {/* job line */}
                           <div className="mt-1 text-sm text-slate-800">
-                            {it.address}
-                            {it.postcode ? <span className="text-slate-600"> • {it.postcode}</span> : null}
-                          </div>
-
-                          <div className="mt-1 text-sm text-slate-700">
-                            <span className="font-semibold">Job:</span> {description || (isBooking ? "One-off collection" : "Empty wheelie bin")}
-                            {!isBooking ? (
+                            <span className="font-semibold">Job:</span> {jobLine}
+                            {booking && it.total_pence != null ? (
                               <>
                                 <span className="mx-2 text-slate-300">•</span>
-                                Extra bags: <span className="font-semibold">{Number(it.extra_bags) || 0}</span>
-                                <span className="mx-2 text-slate-300">•</span>
-                                {it.use_own_bin ? "Own bin" : "Company bin"}
-                              </>
-                            ) : null}
-                            {isBooking && it.total_pence != null ? (
-                              <>
-                                <span className="mx-2 text-slate-300">•</span>
-                                {moneyGBP(it.total_pence)}
+                                <span className="font-semibold">{moneyGBP(it.total_pence)}</span>
                               </>
                             ) : null}
                           </div>
 
-                          {isBooking ? (
-                            <>
-                              {it.customer_name ? (
-                                <div className="mt-1 text-xs text-slate-700">
-                                  Customer: <span className="font-semibold">{it.customer_name}</span>
-                                </div>
-                              ) : null}
-                              {it.notes ? (
-                                <div className="mt-1 text-xs text-slate-700">
-                                  Notes: <span className="font-semibold">{it.notes}</span>
-                                </div>
-                              ) : null}
-                              <div className="mt-1 text-xs text-slate-700">
-                                {it.phone ? (
+                          {/* details */}
+                          {booking ? (
+                            <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
+                              <div className="text-xs text-slate-700">
+                                {customer ? (
                                   <>
-                                    Phone: <span className="font-semibold">{it.phone}</span>
+                                    Customer: <span className="font-semibold">{customer}</span>
                                   </>
                                 ) : (
-                                  <span className="text-slate-500">No phone</span>
+                                  <span className="text-slate-500">No customer name</span>
                                 )}
-                                {it.email ? (
+
+                                {phone ? (
                                   <>
                                     <span className="mx-2 text-slate-300">•</span>
-                                    Email: <span className="font-semibold">{it.email}</span>
+                                    Phone: <span className="font-semibold">{phone}</span>
+                                  </>
+                                ) : null}
+
+                                {email ? (
+                                  <>
+                                    <span className="mx-2 text-slate-300">•</span>
+                                    Email: <span className="font-semibold">{email}</span>
                                   </>
                                 ) : null}
                               </div>
-                            </>
-                          ) : it.ops_notes ? (
-                            <div className="mt-1 text-xs text-slate-700">
-                              Notes: <span className="font-semibold">{it.ops_notes}</span>
+
+                              {notes ? (
+                                <div className="mt-2 text-xs text-slate-700">
+                                  Notes: <span className="font-semibold">{notes}</span>
+                                </div>
+                              ) : (
+                                <div className="mt-2 text-xs text-slate-500">No notes</div>
+                              )}
+                            </div>
+                          ) : opsNotes ? (
+                            <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
+                              <div className="text-xs text-slate-700">
+                                Notes: <span className="font-semibold">{opsNotes}</span>
+                              </div>
                             </div>
                           ) : null}
                         </div>
 
+                        {/* buttons */}
                         <div className="shrink-0 flex gap-2">
-                          {isBooking ? (
-                            isCompleted ? (
+                          {booking ? (
+                            done ? (
                               <button
                                 type="button"
                                 onClick={() => setBookingCompleted(it.id, false)}
@@ -371,7 +442,7 @@ export default function DriverRunPage() {
                                 Completed
                               </button>
                             )
-                          ) : isCompleted ? (
+                          ) : done ? (
                             <button
                               type="button"
                               onClick={() => undoCollected(it.id)}
