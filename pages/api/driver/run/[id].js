@@ -86,11 +86,9 @@ function toQtyTitle(qty, title) {
 function buildBookingDescription(b) {
   const payload = b?.payload || null;
 
-  // ✅ prefer payload.driver_summary
   const ds = String(payload?.driver_summary || "").trim();
   if (ds) return ds;
 
-  // Basket mode: payload.items
   const items = payload?.items;
   if (Array.isArray(items) && items.length) {
     const parts = [];
@@ -103,24 +101,15 @@ function buildBookingDescription(b) {
     if (parts.length) return parts.join(", ");
   }
 
-  // Single mode: payload.title + qty
   const pTitle = payload?.title;
   const pQty = payload?.qty;
   const single = toQtyTitle(pQty, pTitle);
   if (single) return single;
 
-  // Fallback to title column (avoid “Basket order”)
   const colTitle = String(b?.title || "").trim();
   if (colTitle && colTitle.toLowerCase() !== "basket order") return colTitle;
 
   return "One-off collection";
-}
-
-function buildNavDestination(address, postcode) {
-  const a = String(address || "").trim();
-  const p = String(postcode || "").trim();
-  const out = [a, p].filter(Boolean).join(", ");
-  return out || "";
 }
 
 function applyStopOrder({ stopOrder, bookings, subs }) {
@@ -234,6 +223,27 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
+    // ---- Load open issues for this run ----
+    const { data: issueRows, error: eIssues } = await supabase
+      .from("run_stop_issues")
+      .select("stop_type, stop_id, reason, details, created_at")
+      .eq("run_id", runId)
+      .is("resolved_at", null);
+
+    if (eIssues) return res.status(500).json({ error: eIssues.message });
+
+    const issueMap = new Map();
+    for (const r of issueRows || []) {
+      const t = String(r.stop_type || "").toLowerCase();
+      const sid = String(r.stop_id || "");
+      if (!t || !sid) continue;
+      issueMap.set(`${t}:${sid}`, {
+        issue_reason: r.reason || "",
+        issue_details: r.details || "",
+        issue_created_at: r.created_at || null,
+      });
+    }
+
     // Subscriptions
     let subsQuery = supabase
       .from("subscriptions")
@@ -298,21 +308,24 @@ export default async function handler(req, res) {
       }
     }
 
-    const subsStops = (subsDue || []).map((s) => ({
-      type: "subscription",
-      id: String(s.id),
-      address: s.address || "",
-      postcode: s.postcode || "",
-      nav_destination: buildNavDestination(s.address, s.postcode),
-      title: "Empty wheelie bin",
-      description: "Empty wheelie bin",
-      extra_bags: Number(s.extra_bags) || 0,
-      use_own_bin: !!s.use_own_bin,
-      ops_notes: s.ops_notes || "",
-      collected: collectedSet.has(s.id),
-      _sortPostcode: String(s.postcode || ""),
-      _sortAddress: String(s.address || ""),
-    }));
+    const subsStops = (subsDue || []).map((s) => {
+      const issue = issueMap.get(`subscription:${String(s.id)}`) || null;
+      return {
+        type: "subscription",
+        id: String(s.id),
+        address: s.address || "",
+        postcode: s.postcode || "",
+        title: "Empty wheelie bin",
+        description: "Empty wheelie bin",
+        extra_bags: Number(s.extra_bags) || 0,
+        use_own_bin: !!s.use_own_bin,
+        ops_notes: s.ops_notes || "",
+        collected: collectedSet.has(s.id),
+        ...(issue ? issue : {}),
+        _sortPostcode: String(s.postcode || ""),
+        _sortAddress: String(s.address || ""),
+      };
+    });
 
     // Bookings
     const { data: bookingRows, error: eBookings } = await supabase
@@ -361,26 +374,29 @@ export default async function handler(req, res) {
       bookingsDue.push(b);
     }
 
-    const bookingStops = (bookingsDue || []).map((b) => ({
-      type: "booking",
-      id: String(b.id),
-      booking_ref: b.booking_ref || "",
-      address: b.address || "",
-      postcode: b.postcode || "",
-      nav_destination: buildNavDestination(b.address, b.postcode),
-      customer_name: b.name || "",
-      email: b.email || "",
-      phone: b.phone || "",
-      notes: b.notes || "",
-      title: b.booking_ref || "One-off booking",
-      description: buildBookingDescription(b),
-      total_pence: b.total_pence ?? null,
-      payment_status: b.payment_status || "",
-      completed_at: b.completed_at || null,
-      completed_by_run_id: b.completed_by_run_id || null,
-      _sortPostcode: String(b.postcode || ""),
-      _sortAddress: String(b.address || ""),
-    }));
+    const bookingStops = (bookingsDue || []).map((b) => {
+      const issue = issueMap.get(`booking:${String(b.id)}`) || null;
+      return {
+        type: "booking",
+        id: String(b.id),
+        booking_ref: b.booking_ref || "",
+        address: b.address || "",
+        postcode: b.postcode || "",
+        customer_name: b.name || "",
+        email: b.email || "",
+        phone: b.phone || "",
+        notes: b.notes || "",
+        title: b.booking_ref || "One-off booking",
+        description: buildBookingDescription(b),
+        total_pence: b.total_pence ?? null,
+        payment_status: b.payment_status || "",
+        completed_at: b.completed_at || null,
+        completed_by_run_id: b.completed_by_run_id || null,
+        ...(issue ? issue : {}),
+        _sortPostcode: String(b.postcode || ""),
+        _sortAddress: String(b.address || ""),
+      };
+    });
 
     // Merge + order
     let merged = applyStopOrder({
