@@ -17,6 +17,25 @@ function cleanText(s) {
   return String(s || "").trim();
 }
 
+function buildNavDestination(item) {
+  const addr = cleanText(item?.address);
+  const pc = cleanText(item?.postcode);
+
+  // If backend ever provides it, prefer it (future-proof, no harm)
+  const apiDest = cleanText(item?.nav_destination);
+
+  const dest = apiDest || [addr, pc].filter(Boolean).join(", ");
+  return dest || "";
+}
+
+function googleMapsNavUrl(destination) {
+  const dest = cleanText(destination);
+  if (!dest) return "";
+  // Google Maps "Directions" URL. Works on mobile (app) + desktop.
+  // dir_action=navigate encourages navigation mode on mobile.
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving&dir_action=navigate`;
+}
+
 export default function DriverRunPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -329,6 +348,10 @@ export default function DriverRunPage() {
                   const notes = cleanText(it.notes);
                   const opsNotes = cleanText(it.ops_notes);
 
+                  const navDest = buildNavDestination(it);
+                  const navUrl = googleMapsNavUrl(navDest);
+                  const navDisabled = !navUrl;
+
                   return (
                     <div key={key} className={cx("rounded-2xl border p-4 shadow-sm", cardTone(it))}>
                       <div className="flex items-start justify-between gap-3">
@@ -411,7 +434,29 @@ export default function DriverRunPage() {
                         </div>
 
                         {/* buttons */}
-                        <div className="shrink-0 flex gap-2">
+                        <div className="shrink-0 flex flex-col gap-2">
+                          {/* Navigate */}
+                          {navDisabled ? (
+                            <button
+                              type="button"
+                              disabled
+                              className="rounded-xl px-3 py-2 text-sm font-semibold ring-1 bg-slate-200 text-slate-500 ring-slate-200"
+                              title="No address/postcode available for navigation"
+                            >
+                              Navigate
+                            </button>
+                          ) : (
+                            <a
+                              href={navUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="rounded-xl px-3 py-2 text-sm font-semibold ring-1 bg-white text-slate-900 ring-slate-200 hover:bg-slate-50 text-center"
+                            >
+                              Navigate
+                            </a>
+                          )}
+
+                          {/* Complete / Undo */}
                           {booking ? (
                             done ? (
                               <button
