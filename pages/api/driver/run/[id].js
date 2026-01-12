@@ -86,7 +86,7 @@ function toQtyTitle(qty, title) {
 function buildBookingDescription(b) {
   const payload = b?.payload || null;
 
-  // ✅ NEW: prefer payload.driver_summary (your backfill populates this)
+  // ✅ prefer payload.driver_summary
   const ds = String(payload?.driver_summary || "").trim();
   if (ds) return ds;
 
@@ -114,6 +114,13 @@ function buildBookingDescription(b) {
   if (colTitle && colTitle.toLowerCase() !== "basket order") return colTitle;
 
   return "One-off collection";
+}
+
+function buildNavDestination(address, postcode) {
+  const a = String(address || "").trim();
+  const p = String(postcode || "").trim();
+  const out = [a, p].filter(Boolean).join(", ");
+  return out || "";
 }
 
 function applyStopOrder({ stopOrder, bookings, subs }) {
@@ -296,6 +303,7 @@ export default async function handler(req, res) {
       id: String(s.id),
       address: s.address || "",
       postcode: s.postcode || "",
+      nav_destination: buildNavDestination(s.address, s.postcode),
       title: "Empty wheelie bin",
       description: "Empty wheelie bin",
       extra_bags: Number(s.extra_bags) || 0,
@@ -359,6 +367,7 @@ export default async function handler(req, res) {
       booking_ref: b.booking_ref || "",
       address: b.address || "",
       postcode: b.postcode || "",
+      nav_destination: buildNavDestination(b.address, b.postcode),
       customer_name: b.name || "",
       email: b.email || "",
       phone: b.phone || "",
