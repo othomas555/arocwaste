@@ -29,6 +29,10 @@ async function readJsonOrText(res) {
   }
 }
 
+function issueKey(type, id) {
+  return `${String(type || "").toLowerCase()}:${String(id || "")}`;
+}
+
 export default function OpsRunViewPage() {
   const router = useRouter();
   const { id } = router.query;
@@ -47,6 +51,9 @@ export default function OpsRunViewPage() {
     totalCompletedBookings: 0,
   });
 
+  // issues map for quick lookup
+  const [issuesMap, setIssuesMap] = useState({}); // key => {reason,details,created_at}
+
   // staff assignment UI
   const [staffLoading, setStaffLoading] = useState(false);
   const [staffError, setStaffError] = useState("");
@@ -60,6 +67,29 @@ export default function OpsRunViewPage() {
   const [optLoading, setOptLoading] = useState(false);
   const [optMsg, setOptMsg] = useState("");
   const [optErr, setOptErr] = useState("");
+
+  async function loadIssues(runId) {
+    if (!runId) return;
+    try {
+      const res = await fetch(`/api/ops/run/${runId}/issues`);
+      const parsed = await readJsonOrText(res);
+      if (!res.ok) throw new Error(parsed?.json?.error || "Failed to load issues");
+
+      const rows = Array.isArray(parsed?.json?.issues) ? parsed.json.issues : [];
+      const m = {};
+      for (const r of rows) {
+        const k = issueKey(r.stop_type, r.stop_id);
+        m[k] = {
+          reason: String(r.reason || ""),
+          details: String(r.details || ""),
+          created_at: r.created_at || null,
+        };
+      }
+      setIssuesMap(m);
+    } catch {
+      setIssuesMap({});
+    }
+  }
 
   async function load() {
     if (!id) return;
@@ -93,11 +123,13 @@ export default function OpsRunViewPage() {
       );
       if (data.warning) setWarning(data.warning);
 
-      // preselect assigned staff from run payload (daily_run_staff join)
       const assigned = Array.isArray(data.run?.daily_run_staff)
         ? data.run.daily_run_staff.map((x) => x.staff_id).filter(Boolean)
         : [];
       setSelectedStaffIds(assigned);
+
+      // fetch issues after run loads
+      await loadIssues(String(data.run?.id || id));
     } catch (e) {
       setRun(null);
       setStops([]);
@@ -108,6 +140,7 @@ export default function OpsRunViewPage() {
         totalBookings: 0,
         totalCompletedBookings: 0,
       });
+      setIssuesMap({});
       setError(e?.message || "Load failed");
     } finally {
       setLoading(false);
@@ -141,16 +174,13 @@ export default function OpsRunViewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Persist origin locally so ops only types once (optional)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       const k = "aroc_ops_route_origin";
       const v = window.localStorage.getItem(k) || "";
       if (v && !origin) setOrigin(v);
-    } catch {
-      // ignore
-    }
+    } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -158,9 +188,7 @@ export default function OpsRunViewPage() {
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem("aroc_ops_route_origin", String(origin || ""));
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, [origin]);
 
   const staffNames = useMemo(() => {
@@ -274,7 +302,6 @@ export default function OpsRunViewPage() {
     setOptMsg("");
     setOptLoading(true);
     try {
-      // ✅ origin is OPTIONAL now (one-click). If blank, API uses first+last stop as anchors.
       const o = String(origin || "").trim();
 
       const res = await fetch(`/api/ops/run/${run.id}/optimize-order`, {
@@ -298,7 +325,6 @@ export default function OpsRunViewPage() {
 
   const completedStops = useMemo(() => stops.filter((s) => !!s.collected).length, [stops]);
 
-  // For visual numbering across bookings + subscriptions (in their current order)
   const bookingOrderIndex = useMemo(() => {
     const m = new Map();
     (bookings || []).forEach((b, i) => m.set(String(b.id), i + 1));
@@ -322,16 +348,10 @@ export default function OpsRunViewPage() {
           </div>
 
           <div className="flex gap-2">
-            <Link
-              href="/ops/daily-runs"
-              className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm"
-            >
+            <Link href="/ops/daily-runs" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
               Day Planner
             </Link>
-            <Link
-              href="/ops/today"
-              className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm"
-            >
+            <Link href="/ops/today" className="rounded-xl border bg-white px-3 py-2 text-sm font-semibold shadow-sm">
               Today
             </Link>
           </div>
@@ -399,9 +419,7 @@ export default function OpsRunViewPage() {
 
                 <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
                   <div className="md:col-span-2">
-                    <label className="block text-xs font-semibold text-slate-700">
-                      Optional: Origin / depot address
-                    </label>
+                    <label className="block text-xs font-semibold text-slate-700">Optional: Origin / depot address</label>
                     <input
                       value={origin}
                       onChange={(e) => {
@@ -420,9 +438,7 @@ export default function OpsRunViewPage() {
                   <div>
                     <div className="text-xs font-semibold text-slate-700">Status</div>
                     {optErr ? (
-                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">
-                        {optErr}
-                      </div>
+                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">{optErr}</div>
                     ) : optMsg ? (
                       <div className="mt-1 rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">
                         {optMsg}
@@ -436,14 +452,12 @@ export default function OpsRunViewPage() {
                 </div>
               </div>
 
-              {/* ASSIGNMENT */}
+              {/* ASSIGNMENT (unchanged) */}
               <div className="mt-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Assign driver / team</div>
-                    <div className="mt-1 text-xs text-slate-600">
-                      Tick staff members who should see this run in the driver portal.
-                    </div>
+                    <div className="mt-1 text-xs text-slate-600">Tick staff members who should see this run in the driver portal.</div>
                   </div>
 
                   <button
@@ -452,9 +466,7 @@ export default function OpsRunViewPage() {
                     disabled={staffLoading}
                     className={cx(
                       "rounded-lg border px-3 py-2 text-sm font-semibold",
-                      staffLoading
-                        ? "border-slate-200 bg-slate-100 text-slate-500"
-                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+                      staffLoading ? "border-slate-200 bg-slate-100 text-slate-500" : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
                     )}
                   >
                     {staffLoading ? "Refreshing…" : "Refresh staff"}
@@ -462,9 +474,7 @@ export default function OpsRunViewPage() {
                 </div>
 
                 {staffError ? (
-                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                    {staffError}
-                  </div>
+                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{staffError}</div>
                 ) : null}
 
                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -497,10 +507,7 @@ export default function OpsRunViewPage() {
                     type="button"
                     onClick={saveStaffAssignments}
                     disabled={savingStaff}
-                    className={cx(
-                      "rounded-lg px-4 py-2 text-sm font-semibold",
-                      savingStaff ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black"
-                    )}
+                    className={cx("rounded-lg px-4 py-2 text-sm font-semibold", savingStaff ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black")}
                   >
                     {savingStaff ? "Saving…" : "Save assignments"}
                   </button>
@@ -523,24 +530,11 @@ export default function OpsRunViewPage() {
                   <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
                 </div>
               </div>
-
-              <div className="mt-3 text-xs text-slate-500">
-                Slot matching: AM includes AM + ANY + blank. PM includes PM + ANY + blank. ANY includes all.
-              </div>
-
-              {run.notes ? <div className="mt-3 text-sm text-slate-600">{run.notes}</div> : null}
             </div>
 
             {/* ONE-OFF BOOKINGS */}
             <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-base font-semibold text-slate-900">One-off bookings</div>
-                  <div className="mt-1 text-sm text-slate-600">
-                    Bookings matching this run’s date + area + day + slot.
-                  </div>
-                </div>
-              </div>
+              <div className="text-base font-semibold text-slate-900">One-off bookings</div>
 
               {bookings.length === 0 ? (
                 <div className="mt-3 text-sm text-slate-700">No one-off bookings match this run.</div>
@@ -550,6 +544,9 @@ export default function OpsRunViewPage() {
                     const isSaving = savingId === `booking:${b.id}`;
                     const completed = !!b.completed_at;
                     const idx = bookingOrderIndex.get(String(b.id)) || 0;
+
+                    const iss = issuesMap[issueKey("booking", b.id)] || null;
+
                     return (
                       <div key={b.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
                         <div className="flex items-start justify-between gap-3">
@@ -557,55 +554,20 @@ export default function OpsRunViewPage() {
                             <div className="text-base font-semibold text-slate-900">
                               {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
                               {b.booking_ref || "Booking"}
-                              {completed ? (
-                                <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                                  completed
+                              {iss ? (
+                                <span className="ml-2 rounded-full bg-amber-600 px-2 py-1 text-xs font-semibold text-white ring-1 ring-amber-700">
+                                  ISSUE
                                 </span>
-                              ) : (
-                                <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                                  due
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
-
-                            <div className="mt-1 text-sm text-slate-600">
-                              {b.postcode}
-                              <span className="mx-2 text-slate-300">•</span>
-                              Slot:{" "}
-                              <span className="font-semibold text-slate-800">
-                                {String(b.route_slot || "ANY").toUpperCase()}
-                              </span>
-                              <span className="mx-2 text-slate-300">•</span>
-                              {moneyGBP(b.total_pence)}
-                              {b.payment_status ? (
-                                <>
-                                  <span className="mx-2 text-slate-300">•</span>
-                                  <span className="capitalize">{String(b.payment_status)}</span>
-                                </>
                               ) : null}
                             </div>
 
-                            {b.items_summary ? (
-                              <div className="mt-1 text-xs text-slate-600">Items: {b.items_summary}</div>
-                            ) : null}
+                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
+                            <div className="mt-1 text-sm text-slate-600">{b.postcode}</div>
 
-                            {b.notes ? <div className="mt-1 text-xs text-slate-600">Notes: {b.notes}</div> : null}
-
-                            <div className="mt-1 text-xs text-slate-600">
-                              {b.phone ? (
-                                <>
-                                  Phone: <span className="font-semibold text-slate-800">{b.phone}</span>
-                                </>
-                              ) : (
-                                <span className="text-slate-500">No phone</span>
-                              )}
-                            </div>
-
-                            {completed && b.completed_by_run_id ? (
-                              <div className="mt-1 text-xs text-slate-500">
-                                Completed for run: <span className="font-semibold">{b.completed_by_run_id}</span>
+                            {iss ? (
+                              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                                <span className="font-semibold">{iss.reason}</span>
+                                {iss.details ? <span className="ml-2 text-amber-900">• {iss.details}</span> : null}
                               </div>
                             ) : null}
                           </div>
@@ -618,9 +580,7 @@ export default function OpsRunViewPage() {
                                 disabled={isSaving}
                                 className={cx(
                                   "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                  isSaving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                                 )}
                               >
                                 Undo
@@ -632,9 +592,7 @@ export default function OpsRunViewPage() {
                                 disabled={isSaving}
                                 className={cx(
                                   "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                  isSaving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
                                 )}
                               >
                                 Completed
@@ -658,6 +616,8 @@ export default function OpsRunViewPage() {
               <div className="space-y-2 pb-10">
                 {stops.map((s) => {
                   const idx = subOrderIndex.get(String(s.id)) || 0;
+                  const iss = issuesMap[issueKey("subscription", s.id)] || null;
+
                   return (
                     <div key={s.id} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
                       <div className="flex items-start justify-between gap-3">
@@ -665,32 +625,21 @@ export default function OpsRunViewPage() {
                           <div className="text-base font-semibold text-slate-900">
                             {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
                             {s.address}
-                            {s.collected ? (
-                              <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
-                                collected
+                            {iss ? (
+                              <span className="ml-2 rounded-full bg-amber-600 px-2 py-1 text-xs font-semibold text-white ring-1 ring-amber-700">
+                                ISSUE
                               </span>
-                            ) : (
-                              <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                                due
-                              </span>
-                            )}
+                            ) : null}
                           </div>
 
-                          <div className="mt-1 text-sm text-slate-600">
-                            {s.postcode}
-                            <span className="mx-2 text-slate-300">•</span>
-                            Slot:{" "}
-                            <span className="font-semibold text-slate-800">
-                              {String(s.route_slot || "ANY").toUpperCase()}
-                            </span>
-                            <span className="mx-2 text-slate-300">•</span>
-                            Extra bags:{" "}
-                            <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
-                            <span className="mx-2 text-slate-300">•</span>
-                            {s.use_own_bin ? "Own bin" : "Company bin"}
-                          </div>
+                          <div className="mt-1 text-sm text-slate-600">{s.postcode}</div>
 
-                          {s.ops_notes ? <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div> : null}
+                          {iss ? (
+                            <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                              <span className="font-semibold">{iss.reason}</span>
+                              {iss.details ? <span className="ml-2 text-amber-900">• {iss.details}</span> : null}
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="shrink-0 flex gap-2">
@@ -701,9 +650,7 @@ export default function OpsRunViewPage() {
                               disabled={savingId === s.id}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingId === s.id
-                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                  : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                savingId === s.id ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                               )}
                             >
                               Undo
@@ -715,9 +662,7 @@ export default function OpsRunViewPage() {
                               disabled={savingId === s.id}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingId === s.id
-                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                  : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                savingId === s.id ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
                               )}
                             >
                               Collected
