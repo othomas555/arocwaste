@@ -49,6 +49,9 @@ export default function OpsRunViewPage() {
     totalExtraBags: 0,
     totalBookings: 0,
     totalCompletedBookings: 0,
+    // optional new totals
+    totalQuoteVisits: 0,
+    totalCompletedQuoteVisits: 0,
   });
 
   // issues map for quick lookup
@@ -119,6 +122,8 @@ export default function OpsRunViewPage() {
           totalExtraBags: 0,
           totalBookings: 0,
           totalCompletedBookings: 0,
+          totalQuoteVisits: 0,
+          totalCompletedQuoteVisits: 0,
         }
       );
       if (data.warning) setWarning(data.warning);
@@ -128,7 +133,6 @@ export default function OpsRunViewPage() {
         : [];
       setSelectedStaffIds(assigned);
 
-      // fetch issues after run loads
       await loadIssues(String(data.run?.id || id));
     } catch (e) {
       setRun(null);
@@ -139,6 +143,8 @@ export default function OpsRunViewPage() {
         totalExtraBags: 0,
         totalBookings: 0,
         totalCompletedBookings: 0,
+        totalQuoteVisits: 0,
+        totalCompletedQuoteVisits: 0,
       });
       setIssuesMap({});
       setError(e?.message || "Load failed");
@@ -325,6 +331,17 @@ export default function OpsRunViewPage() {
 
   const completedStops = useMemo(() => stops.filter((s) => !!s.collected).length, [stops]);
 
+  // Split bookings for display
+  const quoteBookings = useMemo(
+    () => (bookings || []).filter((b) => String(b?.booking_type || "") === "quote_visit" || !!b?.requires_visit),
+    [bookings]
+  );
+  const jobBookings = useMemo(
+    () => (bookings || []).filter((b) => !(String(b?.booking_type || "") === "quote_visit" || !!b?.requires_visit)),
+    [bookings]
+  );
+
+  // Keep numbering based on the full bookings array
   const bookingOrderIndex = useMemo(() => {
     const m = new Map();
     (bookings || []).forEach((b, i) => m.set(String(b.id), i + 1));
@@ -337,6 +354,138 @@ export default function OpsRunViewPage() {
     (stops || []).forEach((s, i) => m.set(String(s.id), offset + i + 1));
     return m;
   }, [bookings, stops]);
+
+  const hasQuoteTotals = useMemo(() => {
+    const a = Number(totals?.totalQuoteVisits || 0);
+    const b = Number(totals?.totalCompletedQuoteVisits || 0);
+    return a > 0 || b > 0;
+  }, [totals]);
+
+  function BookingCard({ b }) {
+    const isSaving = savingId === `booking:${b.id}`;
+    const completed = !!b.completed_at;
+    const idx = bookingOrderIndex.get(String(b.id)) || 0;
+
+    const isQuote = String(b?.booking_type || "") === "quote_visit" || !!b?.requires_visit;
+    const iss = issuesMap[issueKey("booking", b.id)] || null;
+
+    return (
+      <div
+        className={cx(
+          "rounded-2xl p-4 ring-1",
+          isQuote ? "bg-purple-50 ring-purple-200" : "bg-slate-50 ring-slate-200"
+        )}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-base font-semibold text-slate-900">
+              {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
+              {b.booking_ref || "Booking"}
+
+              {isQuote ? (
+                <span className="ml-2 rounded-full bg-purple-600 px-2 py-1 text-xs font-semibold text-white ring-1 ring-purple-700">
+                  QUOTE VISIT
+                </span>
+              ) : null}
+
+              {iss ? (
+                <span className="ml-2 rounded-full bg-amber-600 px-2 py-1 text-xs font-semibold text-white ring-1 ring-amber-700">
+                  ISSUE
+                </span>
+              ) : null}
+
+              {completed ? (
+                <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                  completed
+                </span>
+              ) : (
+                <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                  due
+                </span>
+              )}
+            </div>
+
+            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
+
+            <div className="mt-1 text-sm text-slate-600">
+              {b.postcode}
+              {b.route_slot ? (
+                <>
+                  <span className="mx-2 text-slate-300">•</span>
+                  Slot:{" "}
+                  <span className="font-semibold text-slate-800">{String(b.route_slot || "ANY").toUpperCase()}</span>
+                </>
+              ) : null}
+              {Number.isFinite(Number(b.total_pence)) ? (
+                <>
+                  <span className="mx-2 text-slate-300">•</span>
+                  {moneyGBP(b.total_pence)}
+                </>
+              ) : null}
+            </div>
+
+            {isQuote ? (
+              <div className="mt-1 text-xs text-purple-900">
+                Site visit required — quote to be given after inspection.
+              </div>
+            ) : null}
+
+            {b.items_summary ? <div className="mt-1 text-xs text-slate-600">Items: {b.items_summary}</div> : null}
+            {b.notes ? <div className="mt-1 text-xs text-slate-600">Notes: {b.notes}</div> : null}
+
+            <div className="mt-1 text-xs text-slate-600">
+              {b.phone ? (
+                <>
+                  Phone: <span className="font-semibold text-slate-800">{b.phone}</span>
+                </>
+              ) : (
+                <span className="text-slate-500">No phone</span>
+              )}
+            </div>
+
+            {iss ? (
+              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                <span className="font-semibold">{iss.reason}</span>
+                {iss.details ? <span className="ml-2 text-amber-900">• {iss.details}</span> : null}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="shrink-0 flex gap-2">
+            {completed ? (
+              <button
+                type="button"
+                onClick={() => setBookingCompleted(b.id, false)}
+                disabled={isSaving}
+                className={cx(
+                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                  isSaving
+                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                )}
+              >
+                Undo
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setBookingCompleted(b.id, true)}
+                disabled={isSaving}
+                className={cx(
+                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
+                  isSaving
+                    ? "bg-slate-200 text-slate-500 ring-slate-200"
+                    : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                )}
+              >
+                Completed
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -419,7 +568,9 @@ export default function OpsRunViewPage() {
 
                 <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
                   <div className="md:col-span-2">
-                    <label className="block text-xs font-semibold text-slate-700">Optional: Origin / depot address</label>
+                    <label className="block text-xs font-semibold text-slate-700">
+                      Optional: Origin / depot address
+                    </label>
                     <input
                       value={origin}
                       onChange={(e) => {
@@ -438,7 +589,9 @@ export default function OpsRunViewPage() {
                   <div>
                     <div className="text-xs font-semibold text-slate-700">Status</div>
                     {optErr ? (
-                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">{optErr}</div>
+                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                        {optErr}
+                      </div>
                     ) : optMsg ? (
                       <div className="mt-1 rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">
                         {optMsg}
@@ -452,12 +605,14 @@ export default function OpsRunViewPage() {
                 </div>
               </div>
 
-              {/* ASSIGNMENT (unchanged) */}
+              {/* ASSIGNMENT */}
               <div className="mt-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Assign driver / team</div>
-                    <div className="mt-1 text-xs text-slate-600">Tick staff members who should see this run in the driver portal.</div>
+                    <div className="mt-1 text-xs text-slate-600">
+                      Tick staff members who should see this run in the driver portal.
+                    </div>
                   </div>
 
                   <button
@@ -466,7 +621,9 @@ export default function OpsRunViewPage() {
                     disabled={staffLoading}
                     className={cx(
                       "rounded-lg border px-3 py-2 text-sm font-semibold",
-                      staffLoading ? "border-slate-200 bg-slate-100 text-slate-500" : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+                      staffLoading
+                        ? "border-slate-200 bg-slate-100 text-slate-500"
+                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
                     )}
                   >
                     {staffLoading ? "Refreshing…" : "Refresh staff"}
@@ -474,7 +631,9 @@ export default function OpsRunViewPage() {
                 </div>
 
                 {staffError ? (
-                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{staffError}</div>
+                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    {staffError}
+                  </div>
                 ) : null}
 
                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -507,102 +666,82 @@ export default function OpsRunViewPage() {
                     type="button"
                     onClick={saveStaffAssignments}
                     disabled={savingStaff}
-                    className={cx("rounded-lg px-4 py-2 text-sm font-semibold", savingStaff ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black")}
+                    className={cx(
+                      "rounded-lg px-4 py-2 text-sm font-semibold",
+                      savingStaff ? "bg-slate-300 text-slate-600" : "bg-slate-900 text-white hover:bg-black"
+                    )}
                   >
                     {savingStaff ? "Saving…" : "Save assignments"}
                   </button>
                 </div>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+              <div className={cx("mt-3 grid grid-cols-2 gap-2", hasQuoteTotals ? "md:grid-cols-5" : "md:grid-cols-4")}>
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Stops</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalStops}</div>
                   <div className="text-xs text-slate-500">{completedStops} collected</div>
                 </div>
+
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Extra bags</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalExtraBags}</div>
                 </div>
+
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">One-off bookings</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
                   <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
                 </div>
+
+                {hasQuoteTotals ? (
+                  <div className="rounded-xl bg-purple-50 p-3 ring-1 ring-purple-200">
+                    <div className="text-xs font-semibold text-purple-700">Quote visits</div>
+                    <div className="text-lg font-semibold text-slate-900">{totals.totalQuoteVisits || 0}</div>
+                    <div className="text-xs text-purple-800">{totals.totalCompletedQuoteVisits || 0} completed</div>
+                  </div>
+                ) : null}
               </div>
             </div>
 
-            {/* ONE-OFF BOOKINGS */}
+            {/* QUOTE VISITS */}
             <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-              <div className="text-base font-semibold text-slate-900">One-off bookings</div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-base font-semibold text-slate-900">Quote visits</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    Site visits where a quote is required (shown in purple).
+                  </div>
+                </div>
+              </div>
 
-              {bookings.length === 0 ? (
-                <div className="mt-3 text-sm text-slate-700">No one-off bookings match this run.</div>
+              {quoteBookings.length === 0 ? (
+                <div className="mt-3 text-sm text-slate-700">No quote visits on this run.</div>
               ) : (
                 <div className="mt-3 space-y-2">
-                  {bookings.map((b) => {
-                    const isSaving = savingId === `booking:${b.id}`;
-                    const completed = !!b.completed_at;
-                    const idx = bookingOrderIndex.get(String(b.id)) || 0;
+                  {quoteBookings.map((b) => (
+                    <BookingCard key={b.id} b={b} />
+                  ))}
+                </div>
+              )}
+            </div>
 
-                    const iss = issuesMap[issueKey("booking", b.id)] || null;
+            {/* JOB BOOKINGS */}
+            <div className="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-base font-semibold text-slate-900">One-off jobs</div>
+                  <div className="mt-1 text-sm text-slate-600">Normal one-off bookings (non-quote).</div>
+                </div>
+              </div>
 
-                    return (
-                      <div key={b.id} className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-base font-semibold text-slate-900">
-                              {idx ? <span className="mr-2 text-slate-500">#{idx}</span> : null}
-                              {b.booking_ref || "Booking"}
-                              {iss ? (
-                                <span className="ml-2 rounded-full bg-amber-600 px-2 py-1 text-xs font-semibold text-white ring-1 ring-amber-700">
-                                  ISSUE
-                                </span>
-                              ) : null}
-                            </div>
-
-                            <div className="mt-1 text-sm text-slate-700">{b.address}</div>
-                            <div className="mt-1 text-sm text-slate-600">{b.postcode}</div>
-
-                            {iss ? (
-                              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
-                                <span className="font-semibold">{iss.reason}</span>
-                                {iss.details ? <span className="ml-2 text-amber-900">• {iss.details}</span> : null}
-                              </div>
-                            ) : null}
-                          </div>
-
-                          <div className="shrink-0 flex gap-2">
-                            {completed ? (
-                              <button
-                                type="button"
-                                onClick={() => setBookingCompleted(b.id, false)}
-                                disabled={isSaving}
-                                className={cx(
-                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
-                                )}
-                              >
-                                Undo
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setBookingCompleted(b.id, true)}
-                                disabled={isSaving}
-                                className={cx(
-                                  "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  isSaving ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
-                                )}
-                              >
-                                Completed
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+              {jobBookings.length === 0 ? (
+                <div className="mt-3 text-sm text-slate-700">No one-off jobs match this run.</div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {jobBookings.map((b) => (
+                    <BookingCard key={b.id} b={b} />
+                  ))}
                 </div>
               )}
             </div>
@@ -630,9 +769,32 @@ export default function OpsRunViewPage() {
                                 ISSUE
                               </span>
                             ) : null}
+
+                            {s.collected ? (
+                              <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                                collected
+                              </span>
+                            ) : (
+                              <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                due
+                              </span>
+                            )}
                           </div>
 
                           <div className="mt-1 text-sm text-slate-600">{s.postcode}</div>
+
+                          <div className="mt-1 text-sm text-slate-600">
+                            Slot:{" "}
+                            <span className="font-semibold text-slate-800">
+                              {String(s.route_slot || "ANY").toUpperCase()}
+                            </span>
+                            <span className="mx-2 text-slate-300">•</span>
+                            Extra bags: <span className="font-semibold text-slate-800">{Number(s.extra_bags) || 0}</span>
+                            <span className="mx-2 text-slate-300">•</span>
+                            {s.use_own_bin ? "Own bin" : "Company bin"}
+                          </div>
+
+                          {s.ops_notes ? <div className="mt-1 text-xs text-slate-500">{s.ops_notes}</div> : null}
 
                           {iss ? (
                             <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
@@ -650,7 +812,9 @@ export default function OpsRunViewPage() {
                               disabled={savingId === s.id}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingId === s.id ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                savingId === s.id
+                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                  : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                               )}
                             >
                               Undo
@@ -662,7 +826,9 @@ export default function OpsRunViewPage() {
                               disabled={savingId === s.id}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingId === s.id ? "bg-slate-200 text-slate-500 ring-slate-200" : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                savingId === s.id
+                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
+                                  : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
                               )}
                             >
                               Collected
