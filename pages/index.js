@@ -28,13 +28,13 @@ function ServiceCard({ title, fromPrice, description, hrefMore, hrefStart, emoji
       </div>
 
       <div className="p-6">
-        <div className="text-xs font-bold tracking-widest text-slate-500">
-          {title.toUpperCase()}
-        </div>
+        <div className="text-xs font-bold tracking-widest text-slate-500">{title.toUpperCase()}</div>
 
-        <div className="mt-2 text-lg font-semibold text-indigo-600">
-          from £{fromPrice}
-        </div>
+        {fromPrice ? (
+          <div className="mt-2 text-lg font-semibold text-indigo-600">from £{fromPrice}</div>
+        ) : (
+          <div className="mt-2 text-lg font-semibold text-indigo-600">Get a price online</div>
+        )}
 
         <p className="mt-3 text-sm text-slate-600">{description}</p>
 
@@ -58,24 +58,19 @@ function ServiceCard({ title, fromPrice, description, hrefMore, hrefStart, emoji
 }
 
 export default function HomePage() {
-  const [postcode, setPostcode] = useState("");
-
   const areas = useMemo(
     () => [
       {
         name: "Bridgend",
-        detail:
-          "Fast local collections across Bridgend and surrounding areas. Choose a service and book in minutes.",
+        detail: "Fast local collections across Bridgend and surrounding areas. Choose a service and book in minutes.",
       },
       {
         name: "Pyle",
-        detail:
-          "Covering Pyle and nearby villages. We’ll confirm your collection day during booking.",
+        detail: "Covering Pyle and nearby villages. We’ll confirm your collection day during booking.",
       },
       {
         name: "Porthcawl",
-        detail:
-          "Porthcawl collections available — book online and we’ll handle the rest.",
+        detail: "Porthcawl collections available — book online and we’ll handle the rest.",
       },
     ],
     []
@@ -97,11 +92,11 @@ export default function HomePage() {
       },
       {
         q: "How is payment taken?",
-        a: "Card payment online (we’ll be using Stripe for secure checkout). For now, your booking flow is set up to confirm details end-to-end, and we’ll switch payment on once you’re ready.",
+        a: "Card payment online (Stripe) for secure checkout. You’ll get an email receipt and confirmation straight away.",
       },
       {
         q: "When will I be billed?",
-        a: "When payment is enabled, you’ll pay during checkout at the time of booking. You’ll get an email receipt and confirmation straight away.",
+        a: "You pay during checkout at the time of booking. You’ll get an email receipt and confirmation straight away.",
       },
     ],
     []
@@ -130,24 +125,28 @@ export default function HomePage() {
             </h1>
 
             <p className="mt-6 text-base sm:text-lg text-slate-700">
-              Fast, simple waste collections across Bridgend, Pyle &amp; Porthcawl.
-              Choose a service that suits you and we’ll take care of the rest.
+              Fast, simple waste collections across Bridgend, Pyle &amp; Porthcawl. Choose a service and book online in
+              minutes.
             </p>
 
-            {/* Postcode prompt (optional, nice touch like Bineezy) */}
+            {/* ✅ REPLACED: CTA buttons instead of postcode input */}
             <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
-              <input
-                value={postcode}
-                onChange={(e) => setPostcode(e.target.value)}
-                placeholder="Enter your postcode"
-                className="w-full sm:w-72 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-indigo-500"
-              />
               <Link
                 href="/bins-bags"
                 className="w-full sm:w-auto inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white hover:opacity-90"
               >
-                Book a collection
+                Bins &amp; Bags
               </Link>
+              <Link
+                href="/man-van"
+                className="w-full sm:w-auto inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-6 py-3 text-sm font-semibold text-slate-900 hover:border-slate-300"
+              >
+                Man &amp; Van
+              </Link>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-500">
+              Appliances and furniture collections can also be booked online.
             </div>
           </div>
 
@@ -169,6 +168,22 @@ export default function HomePage() {
               hrefStart="/man-van"
               emoji="🚚"
             />
+            <ServiceCard
+              title="Appliance removal"
+              fromPrice=""
+              description="Fridges, freezers, washers, tumble dryers and more. See prices and book online."
+              hrefMore="/appliances"
+              hrefStart="/appliances"
+              emoji="🧊"
+            />
+            <ServiceCard
+              title="Furniture removal"
+              fromPrice=""
+              description="Sofas, beds, wardrobes, tables and more. See prices and book online."
+              hrefMore="/furniture"
+              hrefStart="/furniture"
+              emoji="🛋️"
+            />
           </div>
         </div>
       </section>
@@ -179,16 +194,23 @@ export default function HomePage() {
           <div className="grid gap-10 lg:grid-cols-2 lg:items-start">
             <div>
               <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">
-                Simple sign up, <br className="hidden sm:block" />
+                Simple booking, <br className="hidden sm:block" />
                 seamless service
               </h2>
-              <p className="mt-4 text-slate-600">
-                Getting rid of waste should be easy. Here’s how it works:
-              </p>
+              <p className="mt-4 text-slate-600">Getting rid of waste should be easy. Here’s how it works:</p>
 
-              <div className="mt-6">
+              <div className="mt-6 flex flex-wrap gap-3">
                 <Link href="/bins-bags" className="text-indigo-600 font-semibold hover:underline">
-                  Book a collection →
+                  Bins &amp; Bags →
+                </Link>
+                <Link href="/appliances" className="text-indigo-600 font-semibold hover:underline">
+                  Appliances →
+                </Link>
+                <Link href="/furniture" className="text-indigo-600 font-semibold hover:underline">
+                  Furniture →
+                </Link>
+                <Link href="/man-van" className="text-indigo-600 font-semibold hover:underline">
+                  Man &amp; Van →
                 </Link>
               </div>
             </div>
@@ -197,27 +219,23 @@ export default function HomePage() {
               {[
                 {
                   n: "1",
-                  title: "Check your postcode",
-                  text:
-                    "Check to see if we provide services in your area. If not, contact us and we’ll expand soon.",
+                  title: "Choose a service",
+                  text: "Pick bins/bags, Man & Van, furniture or appliances — then choose your options.",
                 },
                 {
                   n: "2",
-                  title: "Choose a service",
-                  text:
-                    "Select bins/bags, Man & Van, furniture, appliances or a clearance — then pick your options.",
+                  title: "Enter address + date",
+                  text: "Tell us where it is and pick the date/slot available during booking.",
                 },
                 {
                   n: "3",
                   title: "Payment",
-                  text:
-                    "Secure card payments (Stripe). We accept all major credit and debit cards.",
+                  text: "Secure card payments (Stripe). We accept all major credit and debit cards.",
                 },
                 {
                   n: "4",
                   title: "Collection",
-                  text:
-                    "Your order is placed and our drivers are notified. We’ll collect on the chosen day.",
+                  text: "Your order is placed and our drivers are notified. We’ll collect on the chosen day.",
                 },
               ].map((step) => (
                 <div key={step.n} className="flex gap-4">
@@ -240,16 +258,20 @@ export default function HomePage() {
         <div className="mx-auto max-w-6xl px-4 py-16">
           <div className="grid gap-10 lg:grid-cols-2">
             <div>
-              <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">
-                Areas we cover
-              </h2>
+              <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Areas we cover</h2>
               <p className="mt-4 text-slate-600">
-                We set collection days to keep routes efficient. During booking we’ll confirm
-                your collection day and available options.
+                We set collection days to keep routes efficient. During booking we’ll confirm your collection day and
+                available options.
               </p>
-              <div className="mt-6">
+              <div className="mt-6 flex flex-wrap gap-3">
                 <Link href="/bins-bags" className="text-indigo-600 font-semibold hover:underline">
-                  Book a collection →
+                  Bins &amp; Bags →
+                </Link>
+                <Link href="/appliances" className="text-indigo-600 font-semibold hover:underline">
+                  Appliances →
+                </Link>
+                <Link href="/furniture" className="text-indigo-600 font-semibold hover:underline">
+                  Furniture →
                 </Link>
               </div>
             </div>
@@ -269,12 +291,8 @@ export default function HomePage() {
       <section className="bg-white">
         <div className="mx-auto max-w-6xl px-4 py-16">
           <div className="text-center">
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">
-              Your questions, answered
-            </h2>
-            <p className="mt-3 text-slate-600">
-              Answers to the most frequently asked questions.
-            </p>
+            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Your questions, answered</h2>
+            <p className="mt-3 text-slate-600">Answers to the most frequently asked questions.</p>
           </div>
 
           <div className="mx-auto mt-10 max-w-3xl rounded-3xl border border-slate-100 bg-white shadow-sm overflow-hidden">
