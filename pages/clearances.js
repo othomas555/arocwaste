@@ -35,6 +35,19 @@ function formatYMDToUK(ymd) {
   }
 }
 
+async function submitClearanceQuote(payload) {
+  const res = await fetch("/api/public/clearance-quote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { error: json?.error || "Quote request failed" };
+  }
+  return json;
+}
+
 export default function ClearancesPage() {
   const [postcode, setPostcode] = useState("");
   const [checked, setChecked] = useState(false);
@@ -43,9 +56,22 @@ export default function ClearancesPage() {
   const [routeResult, setRouteResult] = useState(null);
   const [routeError, setRouteError] = useState("");
 
+  // Quote form fields
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [clearanceType, setClearanceType] = useState("House clearance");
+  const [address, setAddress] = useState("");
+  const [accessNotes, setAccessNotes] = useState("");
+  const [preferredDates, setPreferredDates] = useState("");
+  const [photosLinks, setPhotosLinks] = useState("");
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [submitOk, setSubmitOk] = useState(null);
+
   const route = useMemo(() => {
     if (!checked) return null;
-    // Keep the same shape the old code expected: { day, area, slot?, next_date? }
     const def = routeResult?.default;
     if (!def) return null;
     return {
@@ -60,20 +86,12 @@ export default function ClearancesPage() {
   const notCovered = checked && !loadingRoute && !route && !routeError;
   const hasError = checked && !loadingRoute && !!routeError;
 
-  const mailto = useMemo(() => {
-    // You can change this to your preferred quote inbox
-    const to = "hello@arocwaste.co.uk";
-    const subject = encodeURIComponent("Clearance quote request");
-    const body = encodeURIComponent(
-      `Hi AROC Waste,\n\nI'd like a quote for a clearance.\n\nPostcode: ${postcode || ""}\nType: (house / shed / garden / other)\nAccess notes:\nPreferred dates:\n\nThanks,\n`
-    );
-    return `mailto:${to}?subject=${subject}&body=${body}`;
-  }, [postcode]);
-
   async function onCheckArea() {
     setChecked(true);
     setRouteError("");
     setRouteResult(null);
+    setSubmitOk(null);
+    setSubmitError("");
 
     const pc = normalizePostcode(postcode);
     if (!pc) {
@@ -102,9 +120,61 @@ export default function ClearancesPage() {
     if (!route) return "";
     const next = route.next_date ? formatYMDToUK(route.next_date) : "";
     if (next) return next;
-    // Fallback if next_date missing
     return route.day || "";
   }, [route]);
+
+  const canSubmit = useMemo(() => {
+    // Minimal gating: require postcode + name. (We can tighten later.)
+    const pc = normalizePostcode(postcode);
+    return !!pc && !!String(name || "").trim();
+  }, [postcode, name]);
+
+  async function onSubmitQuote(e) {
+    e.preventDefault();
+    setSubmitting(true);
+    setSubmitError("");
+    setSubmitOk(null);
+
+    const pc = normalizePostcode(postcode);
+    if (!pc) {
+      setSubmitting(false);
+      setSubmitError("Enter a postcode");
+      return;
+    }
+    if (!String(name || "").trim()) {
+      setSubmitting(false);
+      setSubmitError("Enter your name");
+      return;
+    }
+
+    const payload = {
+      postcode: pc,
+      route: routeResult, // includes in_area + default with next_date
+      name: String(name || "").trim(),
+      email: String(email || "").trim(),
+      phone: String(phone || "").trim(),
+      clearance_type: String(clearanceType || "").trim(),
+      address: String(address || "").trim(),
+      access_notes: String(accessNotes || "").trim(),
+      preferred_dates: String(preferredDates || "").trim(),
+      photos_links: String(photosLinks || "").trim(),
+    };
+
+    try {
+      const out = await submitClearanceQuote(payload);
+      if (out?.error) {
+        setSubmitError(out.error);
+      } else if (out?.ok) {
+        setSubmitOk(out);
+      } else {
+        setSubmitError("Quote request failed");
+      }
+    } catch (err) {
+      setSubmitError("Quote request failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <Layout
@@ -260,8 +330,7 @@ export default function ClearancesPage() {
               <div className="lg:col-span-7">
                 <h2 className="text-2xl font-semibold text-slate-900">Get a clearance quote</h2>
                 <p className="mt-2 text-slate-600">
-                  Start by checking your postcode. If we cover your area, request a quote and we’ll
-                  arrange an assessment (or you can send photos).
+                  Start by checking your postcode, then send a quick request and we’ll come back with a quote.
                 </p>
 
                 <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -277,6 +346,8 @@ export default function ClearancesPage() {
                           setChecked(false);
                           setRouteResult(null);
                           setRouteError("");
+                          setSubmitOk(null);
+                          setSubmitError("");
                         }}
                         className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 uppercase outline-none focus:border-slate-900"
                         placeholder="e.g. CF33 4XX"
@@ -316,7 +387,7 @@ export default function ClearancesPage() {
                     <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
                       Sorry — we don’t cover that postcode yet.
                       <div className="mt-2 text-rose-800/80">
-                        You can still contact us and we’ll advise if we can help.
+                        You can still request a quote and we’ll confirm if we can help.
                       </div>
                     </div>
                   )}
@@ -325,35 +396,133 @@ export default function ClearancesPage() {
                 <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                   <div className="text-sm font-semibold text-slate-900">2) Request your quote</div>
                   <p className="mt-2 text-sm text-slate-600">
-                    The quickest way is to send a short description and a few photos. We’ll confirm
-                    the price and agree a date.
+                    Fill in the basics. If you have photos, paste links (Google Photos, iCloud, WhatsApp export, etc).
                   </p>
 
-                  <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                    <a
-                      href={mailto}
-                      className="inline-flex flex-1 items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
-                    >
-                      Email for a quote
-                    </a>
-                    <Link
-                      href="/contact"
-                      className="inline-flex flex-1 items-center justify-center rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50"
-                    >
-                      Use contact form →
-                    </Link>
-                  </div>
+                  <form onSubmit={onSubmitQuote} className="mt-4 space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Name *</label>
+                        <input
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                          placeholder="Your name"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Phone</label>
+                        <input
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                          placeholder="e.g. 07..."
+                        />
+                      </div>
+                    </div>
 
-                  <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
-                    <div className="font-semibold text-slate-900">What to include</div>
-                    <ul className="mt-2 list-disc pl-5 space-y-1 text-slate-600">
-                      <li>Postcode + address (or nearest street)</li>
-                      <li>Type: house / shed / garden</li>
-                      <li>Any access issues (stairs, narrow paths, parking)</li>
-                      <li>Photos (wide shots + any bulky items)</li>
-                      <li>Preferred dates</li>
-                    </ul>
-                  </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Email</label>
+                        <input
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                          placeholder="you@example.com"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Clearance type</label>
+                        <select
+                          value={clearanceType}
+                          onChange={(e) => setClearanceType(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                        >
+                          <option>House clearance</option>
+                          <option>Shed / garage clearance</option>
+                          <option>Garden clearance</option>
+                          <option>Mixed / other</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-medium text-slate-700">Address / nearest street</label>
+                      <input
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                        placeholder="Optional, helps us assess access"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-medium text-slate-700">Access notes / what needs removing</label>
+                      <textarea
+                        value={accessNotes}
+                        onChange={(e) => setAccessNotes(e.target.value)}
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                        rows={4}
+                        placeholder="Stairs, distance to load point, heavy items, etc."
+                      />
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Preferred dates</label>
+                        <input
+                          value={preferredDates}
+                          onChange={(e) => setPreferredDates(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                          placeholder="e.g. next week, weekends, etc."
+                        />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">Photos (links)</label>
+                        <input
+                          value={photosLinks}
+                          onChange={(e) => setPhotosLinks(e.target.value)}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-900"
+                          placeholder="Paste links to photos (optional)"
+                        />
+                      </div>
+                    </div>
+
+                    {submitError ? (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+                        {submitError}
+                      </div>
+                    ) : null}
+
+                    {submitOk ? (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                        ✅ Quote request sent. Reference:{" "}
+                        <span className="font-semibold">{submitOk.quote_id}</span>
+                        {submitOk?.email?.skipped ? (
+                          <div className="mt-2 text-emerald-900/80">
+                            (Stored in system — email not sent: {submitOk.email.reason || "email skipped"})
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <button
+                      type="submit"
+                      disabled={submitting || !canSubmit}
+                      className={[
+                        "inline-flex w-full items-center justify-center rounded-xl px-5 py-3 text-sm font-semibold shadow-sm transition",
+                        submitting || !canSubmit
+                          ? "bg-slate-200 text-slate-500"
+                          : "bg-slate-900 text-white hover:bg-slate-800",
+                      ].join(" ")}
+                    >
+                      {submitting ? "Sending…" : "Request quote"}
+                    </button>
+
+                    <div className="text-xs text-slate-500">
+                      By submitting, you’re asking AROC Waste to contact you about this clearance request.
+                    </div>
+                  </form>
                 </div>
               </div>
 
