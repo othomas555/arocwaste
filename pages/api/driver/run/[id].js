@@ -112,6 +112,52 @@ function buildBookingDescription(b) {
   return "One-off collection";
 }
 
+/**
+ * Quote-visit detection.
+ * We’ll treat a booking as a "quote visit" if:
+ * - payload.booking_type === "quote_visit"
+ * - payload.requires_visit === true
+ * - payload.visit_required === true
+ * - payload.quote_required === true
+ * - payload.service === "man_van_quote" (or similar)
+ * - OR title/driver_summary contains "quote visit" (fallback)
+ *
+ * This is intentionally permissive so you don’t have to get schema perfect on day 1.
+ */
+function detectBookingType(b) {
+  const payload = b?.payload || {};
+  const bt = String(payload?.booking_type || payload?.type || "").trim().toLowerCase();
+
+  const requiresVisit =
+    payload?.requires_visit === true ||
+    payload?.visit_required === true ||
+    payload?.quote_required === true;
+
+  // explicit
+  if (bt === "quote_visit" || bt === "visit" || bt === "site_visit") {
+    return { booking_type: "quote_visit", requires_visit: true };
+  }
+  if (requiresVisit) {
+    return { booking_type: "quote_visit", requires_visit: true };
+  }
+
+  // service hints
+  const service = String(payload?.service || payload?.service_type || payload?.product || "").trim().toLowerCase();
+  if (service.includes("quote") || service.includes("visit")) {
+    return { booking_type: "quote_visit", requires_visit: true };
+  }
+
+  // string fallback
+  const ds = String(payload?.driver_summary || "").trim().toLowerCase();
+  const title = String(b?.title || "").trim().toLowerCase();
+  const notes = String(b?.notes || "").trim().toLowerCase();
+  if (ds.includes("quote") || title.includes("quote") || notes.includes("quote visit") || notes.includes("site visit")) {
+    return { booking_type: "quote_visit", requires_visit: true };
+  }
+
+  return { booking_type: "collection", requires_visit: false };
+}
+
 function applyStopOrder({ stopOrder, bookings, subs }) {
   const bookMap = new Map((bookings || []).map((b) => [String(b.id), b]));
   const subMap = new Map((subs || []).map((s) => [String(s.id), s]));
@@ -376,6 +422,9 @@ export default async function handler(req, res) {
 
     const bookingStops = (bookingsDue || []).map((b) => {
       const issue = issueMap.get(`booking:${String(b.id)}`) || null;
+
+      const { booking_type, requires_visit } = detectBookingType(b);
+
       return {
         type: "booking",
         id: String(b.id),
@@ -392,6 +441,11 @@ export default async function handler(req, res) {
         payment_status: b.payment_status || "",
         completed_at: b.completed_at || null,
         completed_by_run_id: b.completed_by_run_id || null,
+
+        // ✅ new fields for UI colouring / handling
+        booking_type,
+        requires_visit: !!requires_visit,
+
         ...(issue ? issue : {}),
         _sortPostcode: String(b.postcode || ""),
         _sortAddress: String(b.address || ""),
@@ -422,6 +476,11 @@ export default async function handler(req, res) {
     const totalBookings = bookingStops.length;
     const totalCompletedBookings = bookingStops.filter((b) => !!b.completed_at).length;
 
+    // ✅ quote visit totals
+    const quoteVisits = bookingStops.filter((b) => b.booking_type === "quote_visit" || b.requires_visit);
+    const totalQuoteVisits = quoteVisits.length;
+    const totalCompletedQuoteVisits = quoteVisits.filter((b) => !!b.completed_at).length;
+
     const items = merged.map((x) => {
       const copy = { ...x };
       delete copy._sortPostcode;
@@ -434,7 +493,14 @@ export default async function handler(req, res) {
       staff: { id: staffRow.id, name: staffRow.name, email: staffRow.email, role: staffRow.role },
       run,
       items,
-      totals: { totalStops, totalExtraBags, totalBookings, totalCompletedBookings },
+      totals: {
+        totalStops,
+        totalExtraBags,
+        totalBookings,
+        totalCompletedBookings,
+        totalQuoteVisits,
+        totalCompletedQuoteVisits,
+      },
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to load driver run" });
