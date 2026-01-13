@@ -1,33 +1,21 @@
 // pages/api/ops/day-summary.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
+/* ---------- date helpers (UTC-safe YMD) ---------- */
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const DAY_INDEX = {
-  Sunday: 0,
-  Monday: 1,
-  Tuesday: 2,
-  Wednesday: 3,
-  Thursday: 4,
-  Friday: 5,
-  Saturday: 6,
-};
+const DAY_INDEX = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
 
 function isValidYMD(s) {
   return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
-
 function ymdToUTCDate(ymd) {
-  const [Y, M, D] = ymd.split("-").map((n) => Number(n));
-  // noon UTC avoids DST edge issues for date-only comparisons
+  const [Y, M, D] = String(ymd).split("-").map((n) => Number(n));
   return new Date(Date.UTC(Y, M - 1, D, 12, 0, 0));
 }
-
 function weekdayFromYMD(ymd) {
   const dt = ymdToUTCDate(ymd);
-  const idx = dt.getUTCDay();
-  return DAY_NAMES[idx] || null;
+  return DAY_NAMES[dt.getUTCDay()] || null;
 }
-
 function addDaysYMD(ymd, days) {
   const dt = ymdToUTCDate(ymd);
   dt.setUTCDate(dt.getUTCDate() + days);
@@ -36,19 +24,13 @@ function addDaysYMD(ymd, days) {
   const d = String(dt.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
-
 function daysBetweenYMD(a, b) {
   const da = ymdToUTCDate(a);
   const db = ymdToUTCDate(b);
-  const ms = db.getTime() - da.getTime();
-  return Math.round(ms / (24 * 60 * 60 * 1000));
+  return Math.round((db.getTime() - da.getTime()) / (24 * 60 * 60 * 1000));
 }
 
-function normSlot(v) {
-  const s = String(v || "ANY").toUpperCase().trim();
-  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
-}
-
+/* ---------- subscription due logic (same as optimize-order/run API) ---------- */
 function freqWeeks(frequency) {
   const f = String(frequency || "").toLowerCase().trim();
   if (f === "weekly") return 1;
@@ -63,186 +45,186 @@ function nextOnOrAfter(anchorYMD, routeDay) {
   const aDow = DAY_INDEX[aDowName];
   const tDow = DAY_INDEX[String(routeDay || "").trim()];
   if (aDow === undefined || tDow === undefined) return null;
-
   const delta = (tDow - aDow + 7) % 7;
   return addDaysYMD(anchorYMD, delta);
 }
 
 function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
-  if (!isValidYMD(runDate)) return { due: false, reason: "bad_runDate" };
-  if (!isValidYMD(anchorDate)) return { due: false, reason: "missing_anchor" };
-
-  // ✅ repair “anchor is Monday but route day is Thursday” by shifting anchor to next route day
+  if (!isValidYMD(runDate) || !isValidYMD(anchorDate)) return false;
   const effectiveAnchor = nextOnOrAfter(anchorDate, routeDay);
-  if (!effectiveAnchor) return { due: false, reason: "bad_dates" };
-
+  if (!effectiveAnchor) return false;
   const diffDays = daysBetweenYMD(effectiveAnchor, runDate);
-  if (diffDays < 0) return { due: false, reason: "before_anchor" };
-
+  if (diffDays < 0) return false;
   const periodDays = freqWeeks(frequency) * 7;
-  return {
-    due: diffDays % periodDays === 0,
-    reason: diffDays % periodDays === 0 ? "due" : "not_due",
-  };
+  return diffDays % periodDays === 0;
 }
 
-function matchesRunSlot(runSlot, subSlot) {
-  const r = normSlot(runSlot);
-  const sRaw = String(subSlot ?? "").trim();
-  const s = sRaw ? normSlot(sRaw) : "BLANK";
+function normSlot(v) {
+  const s = String(v || "ANY").toUpperCase().trim();
+  return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
+}
 
+function matchesRunSlot(runSlot, rowSlot) {
+  const r = normSlot(runSlot);
+  const raw = String(rowSlot ?? "").trim();
+  const s = raw ? normSlot(raw) : "BLANK";
   if (r === "ANY") return true;
-  // AM run includes AM + ANY + blank
   if (r === "AM") return s === "AM" || s === "ANY" || s === "BLANK";
-  // PM run includes PM + ANY + blank
   if (r === "PM") return s === "PM" || s === "ANY" || s === "BLANK";
   return true;
 }
 
+/* ---------- quote detection (Man & Van quote visit) ---------- */
+function isQuoteVisitBooking(b) {
+  const st = String(b?.status || "").toLowerCase();
+  const pay = String(b?.payment_status || "").toLowerCase();
+  const title = String(b?.title || "").toLowerCase();
+
+  // Primary markers we set in the new API:
+  if (st === "quote_requested") return true;
+  if (pay === "quote") return true;
+
+  // Fallback markers (safe):
+  if (title.includes("quote visit")) return true;
+
+  // If payload exists and includes our mode:
+  const mode = String(b?.payload?.mode || "").toLowerCase();
+  if (mode === "manvan_quote") return true;
+
+  return false;
+}
+
 export default async function handler(req, res) {
-  if (req.method !== "GET" && req.method !== "POST") {
-    res.setHeader("Allow", "GET, POST");
+  if (req.method !== "GET") {
+    res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   const supabase = getSupabaseAdmin();
   if (!supabase) return res.status(500).json({ error: "Supabase admin not configured" });
 
+  const date = String(req.query.date || "").slice(0, 10);
+  if (!isValidYMD(date)) return res.status(400).json({ error: "Invalid date. Use YYYY-MM-DD." });
+
+  const dayName = weekdayFromYMD(date);
+  if (!dayName) return res.status(400).json({ error: "Could not derive weekday for date." });
+
   try {
-    const src = req.method === "GET" ? req.query : req.body || {};
-    const date = String(src.date || "").trim();
-
-    if (!isValidYMD(date)) {
-      return res.status(400).json({ error: "Invalid date. Expected YYYY-MM-DD." });
-    }
-
-    const route_day = weekdayFromYMD(date);
-    if (!route_day) return res.status(400).json({ error: "Could not compute weekday for date" });
-
-    // 1) active route areas for that weekday (this drives the cards)
-    const { data: routeAreas, error: eAreas } = await supabase
+    // Get route areas active for that day so we know which (area|slot) cards exist
+    const { data: areas, error: eAreas } = await supabase
       .from("route_areas")
-      .select("id,name,route_day,slot,active")
+      .select("name,route_day,slot,active")
       .eq("active", true)
-      .eq("route_day", route_day);
+      .eq("route_day", dayName);
 
     if (eAreas) return res.status(500).json({ error: eAreas.message });
 
-    // 2) pull all active subs for that day (not filtered by next_collection_date)
-    const { data: subs, error: eSubs } = await supabase
-      .from("subscriptions")
-      .select("id,status,route_day,route_area,route_slot,frequency,anchor_date")
-      .eq("status", "active")
-      .eq("route_day", route_day);
-
-    if (eSubs) return res.status(500).json({ error: eSubs.message });
-
-    // Build dueCounts keyed by "Area|SLOT" (exactly what pages/ops/daily-runs.js expects)
-    const dueCounts = {};
-    let missingAnchor = 0;
-
-    // Pre-build the card keys we care about (area+slot combos from route_areas)
-    const cardKeys = new Set();
-    for (const r of routeAreas || []) {
+    const combos = [];
+    const seen = new Set();
+    for (const r of areas || []) {
       const area = String(r.name || "").trim();
       const slot = normSlot(r.slot || "ANY");
       if (!area) continue;
-      cardKeys.add(`${area}|${slot}`);
+      const key = `${area}|${slot}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      combos.push({ area, slot, key });
     }
 
-    // 2a) subscriptions due
+    // Init breakdown maps with 0 so UI never shows undefined
+    const subsCounts = {};
+    const bookingsCounts = {};
+    const quotesCounts = {};
+    const totalCounts = {};
+
+    for (const c of combos) {
+      subsCounts[c.key] = 0;
+      bookingsCounts[c.key] = 0;
+      quotesCounts[c.key] = 0;
+      totalCounts[c.key] = 0;
+    }
+
+    // ---- subscriptions due ----
+    // Pull active subs that are on that weekday (route_day matches area cards)
+    const { data: subs, error: eSubs } = await supabase
+      .from("subscriptions")
+      .select("id,route_area,route_day,route_slot,frequency,anchor_date,status")
+      .eq("status", "active")
+      .eq("route_day", dayName);
+
+    if (eSubs) return res.status(500).json({ error: eSubs.message });
+
     for (const s of subs || []) {
       const area = String(s.route_area || "").trim();
-      if (!area) continue;
+      const slot = normSlot(s.route_slot || "ANY");
+      const key = `${area}|${slot}`;
+
+      // Only count if this (area|slot) exists as a card for that day
+      if (!(key in subsCounts)) continue;
 
       const anchor = s.anchor_date ? String(s.anchor_date).slice(0, 10) : "";
-      const check = isDueOnDate({
-        runDate: date,
-        routeDay: s.route_day,
-        anchorDate: anchor,
-        frequency: s.frequency,
-      });
+      if (!anchor) continue;
 
-      if (check.reason === "missing_anchor") missingAnchor++;
-      if (!check.due) continue;
-
-      // subscriber slot compared against each run slot card (AM/PM/ANY)
-      // but only count against cards that exist for this weekday (routeAreas list)
-      for (const key of cardKeys) {
-        const [cardArea, cardSlot] = key.split("|");
-        if (cardArea !== area) continue;
-
-        if (matchesRunSlot(cardSlot, s.route_slot)) {
-          dueCounts[key] = (dueCounts[key] || 0) + 1;
-        }
+      if (
+        isDueOnDate({
+          runDate: date,
+          routeDay: s.route_day,
+          anchorDate: anchor,
+          frequency: s.frequency,
+        })
+      ) {
+        subsCounts[key] += 1;
       }
     }
 
-    // 3) one-off bookings due on this date (furniture/appliances/basket orders, etc)
-    // We match by service_date OR (legacy) collection_date, and count them into the same card keys.
-    let bookingsForDate = 0;
-    let bookingsMissingArea = 0;
-
-    const { data: bookings, error: eBookings } = await supabase
+    // ---- bookings due (includes furniture/appliances etc) ----
+    // Due rule: service_date == date OR collection_date == date
+    const { data: bookingRows, error: eBookings } = await supabase
       .from("bookings")
-      .select("id,status,route_area,route_slot,service_date,collection_date")
-      .neq("status", "cancelled")
-      .or(`service_date.eq.${date},collection_date.eq.${date}`);
+      .select("id,route_area,route_day,route_slot,service_date,collection_date,status,payment_status,title,payload")
+      .eq("route_day", dayName);
 
     if (eBookings) return res.status(500).json({ error: eBookings.message });
 
-    for (const b of bookings || []) {
-      // Only count booked work (keep this simple; you can widen later)
-      if (String(b.status || "").toLowerCase() !== "booked") continue;
+    for (const b of bookingRows || []) {
+      const service = b?.service_date ? String(b.service_date).slice(0, 10) : "";
+      const coll = b?.collection_date ? String(b.collection_date).slice(0, 10) : "";
+      const dueDate = service || coll;
+      if (!dueDate || dueDate !== date) continue;
+
+      const st = String(b.status || "").toLowerCase();
+      if (st === "cancelled" || st === "canceled") continue;
 
       const area = String(b.route_area || "").trim();
-      if (!area) {
-        bookingsMissingArea++;
-        continue;
-      }
+      const slot = normSlot(b.route_slot || "ANY");
+      const key = `${area}|${slot}`;
+      if (!(key in bookingsCounts) && !(key in quotesCounts)) continue;
 
-      bookingsForDate++;
-
-      // Count this booking against whichever card slots match (AM/PM/ANY rules)
-      for (const key of cardKeys) {
-        const [cardArea, cardSlot] = key.split("|");
-        if (cardArea !== area) continue;
-
-        if (matchesRunSlot(cardSlot, b.route_slot)) {
-          dueCounts[key] = (dueCounts[key] || 0) + 1;
-        }
+      // Quote visits counted separately
+      if (isQuoteVisitBooking(b)) {
+        if (key in quotesCounts) quotesCounts[key] += 1;
+      } else {
+        if (key in bookingsCounts) bookingsCounts[key] += 1;
       }
     }
 
-    let warning = "";
-    if (missingAnchor > 0) {
-      warning = `${missingAnchor} active subscription(s) are missing anchor_date, so they cannot be scheduled.`;
-    }
-
-    if (bookingsMissingArea > 0) {
-      warning = warning
-        ? `${warning} Also: ${bookingsMissingArea} booking(s) are missing route_area so cannot be shown on the day planner.`
-        : `${bookingsMissingArea} booking(s) are missing route_area so cannot be shown on the day planner.`;
+    // ---- totals ----
+    for (const k of Object.keys(totalCounts)) {
+      totalCounts[k] = (subsCounts[k] || 0) + (bookingsCounts[k] || 0) + (quotesCounts[k] || 0);
     }
 
     return res.status(200).json({
       ok: true,
       date,
-      route_day,
-
-      // ✅ what daily-runs uses
-      dueCounts,
-
-      // useful for debugging / future UI
-      routeAreas: routeAreas || [],
-      totals: {
-        routeAreas: (routeAreas || []).length,
-        activeSubsForDay: (subs || []).length,
-        missingAnchor,
-        bookingsForDate,
-        bookingsMissingArea,
+      routeDay: dayName,
+      // Backward-compatible: dueCounts remains the main total used by older UI
+      dueCounts: totalCounts,
+      // New: breakdown for nicer UI
+      breakdown: {
+        subscriptions: subsCounts,
+        bookings: bookingsCounts,
+        quotes: quotesCounts,
       },
-      warning,
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to load day summary" });
