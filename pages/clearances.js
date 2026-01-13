@@ -1,19 +1,64 @@
+// pages/clearances.js
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import Layout from "../components/layout";
-import { findRouteForPostcode } from "../utils/postcode";
+
+function normalizePostcode(pc) {
+  return String(pc || "").trim().toUpperCase().replace(/\s+/g, " ").trim();
+}
+
+async function lookupRoute(postcode) {
+  const pc = normalizePostcode(postcode);
+  if (!pc) return null;
+
+  const res = await fetch(`/api/route-lookup?postcode=${encodeURIComponent(pc)}`);
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: json?.error || "Route lookup failed" };
+  return json;
+}
+
+function formatYMDToUK(ymd) {
+  if (!ymd || typeof ymd !== "string") return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`);
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      timeZone: "Europe/London",
+    }).format(d);
+  } catch {
+    return ymd;
+  }
+}
 
 export default function ClearancesPage() {
   const [postcode, setPostcode] = useState("");
   const [checked, setChecked] = useState(false);
 
+  const [loadingRoute, setLoadingRoute] = useState(false);
+  const [routeResult, setRouteResult] = useState(null);
+  const [routeError, setRouteError] = useState("");
+
   const route = useMemo(() => {
     if (!checked) return null;
-    return findRouteForPostcode(postcode);
-  }, [checked, postcode]);
+    // Keep the same shape the old code expected: { day, area, slot?, next_date? }
+    const def = routeResult?.default;
+    if (!def) return null;
+    return {
+      day: def.route_day,
+      area: def.route_area,
+      slot: def.slot || "ANY",
+      next_date: def.next_date || null,
+    };
+  }, [checked, routeResult]);
 
-  const covered = checked && !!route;
-  const notCovered = checked && !route;
+  const covered = checked && !loadingRoute && !!route;
+  const notCovered = checked && !loadingRoute && !route && !routeError;
+  const hasError = checked && !loadingRoute && !!routeError;
 
   const mailto = useMemo(() => {
     // You can change this to your preferred quote inbox
@@ -24,6 +69,42 @@ export default function ClearancesPage() {
     );
     return `mailto:${to}?subject=${subject}&body=${body}`;
   }, [postcode]);
+
+  async function onCheckArea() {
+    setChecked(true);
+    setRouteError("");
+    setRouteResult(null);
+
+    const pc = normalizePostcode(postcode);
+    if (!pc) {
+      setRouteError("Enter a postcode");
+      return;
+    }
+
+    setLoadingRoute(true);
+    try {
+      const out = await lookupRoute(pc);
+      if (!out) {
+        setRouteError("Route lookup failed");
+      } else if (out.error) {
+        setRouteError(out.error);
+      } else {
+        setRouteResult(out);
+      }
+    } catch (e) {
+      setRouteError("Route lookup failed");
+    } finally {
+      setLoadingRoute(false);
+    }
+  }
+
+  const coverageDateText = useMemo(() => {
+    if (!route) return "";
+    const next = route.next_date ? formatYMDToUK(route.next_date) : "";
+    if (next) return next;
+    // Fallback if next_date missing
+    return route.day || "";
+  }, [route]);
 
   return (
     <Layout
@@ -43,7 +124,7 @@ export default function ClearancesPage() {
             <div className="mt-5 grid gap-6 lg:grid-cols-12 lg:items-start">
               <div className="lg:col-span-7">
                 <h1 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-                  House, shed & garden clearances — done properly.
+                  House, shed &amp; garden clearances — done properly.
                 </h1>
                 <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-600">
                   If you’ve got a full property to clear, bulky rubbish in a shed, or a garden
@@ -194,6 +275,8 @@ export default function ClearancesPage() {
                         onChange={(e) => {
                           setPostcode(e.target.value);
                           setChecked(false);
+                          setRouteResult(null);
+                          setRouteError("");
                         }}
                         className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 uppercase outline-none focus:border-slate-900"
                         placeholder="e.g. CF33 4XX"
@@ -202,17 +285,23 @@ export default function ClearancesPage() {
 
                     <button
                       type="button"
-                      onClick={() => setChecked(true)}
+                      onClick={onCheckArea}
                       className="inline-flex items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
                     >
-                      Check area
+                      {loadingRoute ? "Checking…" : "Check area"}
                     </button>
                   </div>
+
+                  {hasError && (
+                    <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+                      {routeError}
+                    </div>
+                  )}
 
                   {covered && (
                     <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
                       ✅ We cover your postcode. We’re in your area on{" "}
-                      <span className="font-semibold">{route.day}</span>
+                      <span className="font-semibold">{coverageDateText}</span>
                       {route.area ? (
                         <>
                           {" "}
