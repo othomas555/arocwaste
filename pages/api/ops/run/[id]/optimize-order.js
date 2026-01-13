@@ -1,3 +1,4 @@
+// pages/api/ops/run/[id]/optimize-order.js
 import { getSupabaseAdmin } from "../../../../../lib/supabaseAdmin";
 
 function normSlot(v) {
@@ -5,9 +6,9 @@ function normSlot(v) {
   return ["ANY", "AM", "PM"].includes(s) ? s : "ANY";
 }
 
-function matchesRunSlot(runSlot, itemSlot) {
+function matchesRunSlot(runSlot, rowSlot) {
   const r = normSlot(runSlot);
-  const raw = String(itemSlot ?? "").trim();
+  const raw = String(rowSlot ?? "").trim();
   const s = raw ? normSlot(raw) : "BLANK";
   if (r === "ANY") return true;
   if (r === "AM") return s === "AM" || s === "ANY" || s === "BLANK";
@@ -19,11 +20,11 @@ function fullStopAddress(row) {
   const a = String(row.address || "").trim();
   const p = String(row.postcode || "").trim();
   if (!a && !p) return "";
-  // Postcode is the key bit for UK geocoding reliability.
+  // UK-friendly: include postcode to help geocode
   return `${a}${p ? `, ${p}` : ""}, UK`;
 }
 
-// ---------- Subscription due logic (copied from driver run API for consistency) ----------
+/* ---------- Subscription “due” logic (mirrors driver run API) ---------- */
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DAY_INDEX = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
 
@@ -76,20 +77,23 @@ function isDueOnDate({ runDate, routeDay, anchorDate, frequency }) {
   const periodDays = freqWeeks(frequency) * 7;
   return diffDays % periodDays === 0;
 }
-// --------------------------------------------------------------------------------------
 
-async function googleDirectionsOptimize({ apiKey, origin, destination, waypointAddresses }) {
-  const wp = waypointAddresses.map((w) => encodeURIComponent(w)).join("|");
+/* ---------- Google Directions “optimize:true” ---------- */
+async function googleOptimize({ apiKey, origin, destination, waypoints }) {
+  // IMPORTANT: Do NOT prepend `via:` here — we want stable `waypoint_order`.
+  // Note: each waypoint is URL encoded; pipes are separators.
+  const wp = waypoints.map((w) => encodeURIComponent(w)).join("|");
 
   const url =
     `https://maps.googleapis.com/maps/api/directions/json` +
     `?origin=${encodeURIComponent(origin)}` +
-    `&destination=${encodeURIComponent(destination)}` +
+    `&destination=${encodeURIComponent(destination || origin)}` +
     `&waypoints=optimize:true|${wp}` +
     `&key=${encodeURIComponent(apiKey)}`;
 
   const res = await fetch(url);
   const json = await res.json().catch(() => ({}));
+
   if (!res.ok) throw new Error(`Google Directions failed (${res.status})`);
   if (json.status !== "OK") {
     throw new Error(`Google Directions status: ${json.status} ${json.error_message || ""}`.trim());
@@ -98,6 +102,7 @@ async function googleDirectionsOptimize({ apiKey, origin, destination, waypointA
   const route = json.routes?.[0];
   const order = route?.waypoint_order;
   if (!Array.isArray(order)) throw new Error("Google Directions did not return waypoint_order");
+
   return order;
 }
 
@@ -118,8 +123,14 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body || {};
-    const providedOrigin = String(body.origin || "").trim();
-    const providedDestination = String(body.destination || "").trim();
+    const origin = String(body.origin || "").trim();
+    const destination = String(body.destination || "").trim();
+
+    if (!origin) {
+      return res.status(400).json({
+        error: "Missing origin. Provide { origin: 'your depot address, postcode' }",
+      });
+    }
 
     const { data: run, error: eRun } = await supabase
       .from("daily_runs")
@@ -136,21 +147,26 @@ export default async function handler(req, res) {
 
     const runSlot = normSlot(run.route_slot);
 
-    // ---- Load SUBSCRIPTIONS that are DUE for this run date (same logic as driver) ----
-    const { data: subsRaw, error: eSubs } = await supabase
+    // ----- Subscriptions (due only) -----
+    let subsQuery = supabase
       .from("subscriptions")
       .select("id,address,postcode,route_slot,status,route_area,route_day,frequency,anchor_date")
       .eq("status", "active")
       .eq("route_area", run.route_area)
       .eq("route_day", run.route_day);
 
+    if (runSlot !== "ANY") {
+      subsQuery = subsQuery.or(`route_slot.eq.${runSlot},route_slot.eq.ANY,route_slot.is.null,route_slot.eq.""`);
+    }
+
+    const { data: subsRaw, error: eSubs } = await subsQuery;
     if (eSubs) return res.status(500).json({ error: eSubs.message });
 
     const subsDue = [];
     for (const s of subsRaw || []) {
-      if (!matchesRunSlot(runSlot, s.route_slot)) continue;
       const anchor = s.anchor_date ? String(s.anchor_date).slice(0, 10) : "";
       if (!anchor) continue;
+      if (!matchesRunSlot(runSlot, s.route_slot)) continue;
 
       if (
         isDueOnDate({
@@ -164,7 +180,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- Load BOOKINGS that are DUE for this run date (same rule as driver) ----
+    // ----- Bookings (due only) -----
     const { data: bookingRows, error: eBookings } = await supabase
       .from("bookings")
       .select("id,address,postcode,route_slot,route_area,route_day,service_date,collection_date,status")
@@ -188,98 +204,48 @@ export default async function handler(req, res) {
       bookingsDue.push(b);
     }
 
-    // Unified list (this is what we will order)
-    const allStops = [
-      ...bookingsDue.map((b) => ({
-        type: "booking",
-        id: String(b.id),
-        address: b.address,
-        postcode: b.postcode,
-        _addr: fullStopAddress(b),
-      })),
-      ...subsDue.map((s) => ({
-        type: "subscription",
-        id: String(s.id),
-        address: s.address,
-        postcode: s.postcode,
-        _addr: fullStopAddress(s),
-      })),
-    ].filter((x) => !!x._addr);
+    // Build unified stop list for routing (bookings first then subs)
+    const all = [
+      ...bookingsDue.map((b) => ({ type: "booking", id: String(b.id), address: b.address, postcode: b.postcode })),
+      ...subsDue.map((s) => ({ type: "subscription", id: String(s.id), address: s.address, postcode: s.postcode })),
+    ].filter((x) => fullStopAddress(x));
 
-    if (allStops.length === 0) {
-      const { error: eSaveEmpty } = await supabase.from("daily_runs").update({ stop_order: [] }).eq("id", runId);
-      if (eSaveEmpty) return res.status(500).json({ error: eSaveEmpty.message });
-      return res.status(200).json({ ok: true, stop_order: [], note: "No routable stops." });
+    if (all.length < 2) {
+      const stop_order = all.map((x) => ({ type: x.type, id: x.id }));
+      const { error: eSave0 } = await supabase.from("daily_runs").update({ stop_order }).eq("id", runId);
+      if (eSave0) return res.status(500).json({ error: eSave0.message });
+      return res.status(200).json({ ok: true, stop_order, note: "Not enough stops to optimize. Saved basic order." });
     }
 
-    if (allStops.length === 1) {
-      const stop_order = [{ type: allStops[0].type, id: allStops[0].id }];
-      const { error: eSaveOne } = await supabase.from("daily_runs").update({ stop_order }).eq("id", runId);
-      if (eSaveOne) return res.status(500).json({ error: eSaveOne.message });
-      return res.status(200).json({ ok: true, stop_order, note: "Only one stop. Saved basic order." });
-    }
-
-    // Google Directions standard waypoint limit (excludes origin/destination): ~23
+    // Google standard Directions has a waypoint limit (~23). Keep safe.
     const MAX_WAYPOINTS = 23;
+    const sliced = all.slice(0, MAX_WAYPOINTS);
 
-    let stop_order = [];
-    let truncated = false;
+    const waypoints = sliced.map((x) => fullStopAddress(x));
+    const wpOrder = await googleOptimize({
+      apiKey,
+      origin,
+      destination: destination || origin,
+      waypoints,
+    });
 
-    if (providedOrigin) {
-      // Yard round-trip mode: origin -> origin (or provided destination) with all stops as waypoints
-      const origin = providedOrigin;
-      const destination = providedDestination || providedOrigin;
+    // wpOrder gives indices into `waypoints` (and therefore `sliced`)
+    const stop_order = wpOrder.map((idx) => ({ type: sliced[idx].type, id: sliced[idx].id }));
 
-      const sliced = allStops.slice(0, MAX_WAYPOINTS);
-      truncated = allStops.length > MAX_WAYPOINTS;
-
-      const waypointAddresses = sliced.map((x) => x._addr);
-      const wpOrder = await googleDirectionsOptimize({ apiKey, origin, destination, waypointAddresses });
-
-      stop_order = wpOrder.map((idx) => ({ type: sliced[idx].type, id: sliced[idx].id }));
-
-      // Append remainder if truncated (unsorted)
-      for (const x of allStops.slice(MAX_WAYPOINTS)) {
-        stop_order.push({ type: x.type, id: x.id });
-      }
-    } else {
-      // One-click mode: first & last stop are anchors, optimise the middle
-      const first = allStops[0];
-      const last = allStops[allStops.length - 1];
-
-      const middle = allStops.slice(1, -1);
-      const middleAllowed = middle.slice(0, MAX_WAYPOINTS);
-      truncated = middle.length > MAX_WAYPOINTS;
-
-      if (middleAllowed.length === 0) {
-        stop_order = [
-          { type: first.type, id: first.id },
-          { type: last.type, id: last.id },
-        ];
-      } else {
-        const origin = first._addr;
-        const destination = last._addr;
-        const waypointAddresses = middleAllowed.map((x) => x._addr);
-
-        const wpOrder = await googleDirectionsOptimize({ apiKey, origin, destination, waypointAddresses });
-
-        stop_order = [
-          { type: first.type, id: first.id },
-          ...wpOrder.map((idx) => ({ type: middleAllowed[idx].type, id: middleAllowed[idx].id })),
-          { type: last.type, id: last.id },
-        ];
-
-        // Append remainder if truncated (unsorted)
-        for (const x of middle.slice(MAX_WAYPOINTS)) {
-          stop_order.push({ type: x.type, id: x.id });
-        }
-      }
+    // If we truncated due to waypoint limits, append remainder at end (unsorted)
+    for (const x of all.slice(MAX_WAYPOINTS)) {
+      stop_order.push({ type: x.type, id: x.id });
     }
 
     const { error: eSave } = await supabase.from("daily_runs").update({ stop_order }).eq("id", runId);
     if (eSave) return res.status(500).json({ error: eSave.message });
 
-    return res.status(200).json({ ok: true, stop_order, truncated });
+    return res.status(200).json({
+      ok: true,
+      stop_order,
+      truncated: all.length > MAX_WAYPOINTS,
+      counts: { total: all.length, optimized: Math.min(all.length, MAX_WAYPOINTS) },
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to optimize route" });
   }
