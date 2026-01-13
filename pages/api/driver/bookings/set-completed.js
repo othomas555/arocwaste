@@ -7,6 +7,31 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
+function isEmail(s) {
+  const x = String(s || "").trim();
+  if (!x) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
+}
+
+function plusHoursISO(hours) {
+  const d = new Date();
+  d.setHours(d.getHours() + Number(hours || 0));
+  return d.toISOString();
+}
+
+function guessBookAgainUrl(bookingRow) {
+  const blob = JSON.stringify(bookingRow || {}).toLowerCase();
+
+  if (blob.includes("appliance")) return "https://www.arocwaste.co.uk/appliances";
+  if (blob.includes("furniture")) return "https://www.arocwaste.co.uk/furniture";
+  if (blob.includes("man") && blob.includes("van")) return "https://www.arocwaste.co.uk/man-van";
+
+  // fallback: clearances page also useful for bulky jobs
+  if (blob.includes("clearance")) return "https://www.arocwaste.co.uk/clearances";
+
+  return "https://www.arocwaste.co.uk/";
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -57,15 +82,72 @@ export default async function handler(req, res) {
     if (eLink) return res.status(500).json({ error: eLink.message });
     if (!linkRow) return res.status(403).json({ error: "You are not assigned to this run" });
 
-    // update booking
+    // update booking (return full row so we can build email payload without guessing columns)
     const patch = completed
       ? { completed_at: new Date().toISOString(), completed_by_run_id: run_id }
       : { completed_at: null, completed_by_run_id: null };
 
-    const { error: eUp } = await supabase.from("bookings").update(patch).eq("id", booking_id);
+    const { data: bookingRow, error: eUp } = await supabase
+      .from("bookings")
+      .update(patch)
+      .eq("id", booking_id)
+      .select("*")
+      .maybeSingle();
+
     if (eUp) return res.status(500).json({ error: eUp.message });
 
-    return res.status(200).json({ ok: true });
+    // If completed=false -> cancel any pending completion email
+    if (!completed) {
+      await supabase
+        .from("notification_queue")
+        .update({ status: "cancelled", cancelled_at: new Date().toISOString() })
+        .eq("event_type", "booking_completed")
+        .eq("target_type", "booking")
+        .eq("target_id", booking_id)
+        .eq("status", "pending");
+      return res.status(200).json({ ok: true, notification: "cancelled_if_pending" });
+    }
+
+    // completed=true -> enqueue email (1 hour delay) if we have a valid recipient email on the booking
+    const recipient = String(bookingRow?.email || "").trim();
+    if (!isEmail(recipient)) {
+      return res.status(200).json({ ok: true, notification: "skipped_no_valid_email" });
+    }
+
+    const payload = {
+      booking_id: booking_id,
+      booking_ref: bookingRow?.booking_ref || bookingRow?.ref || bookingRow?.reference || "",
+      name: bookingRow?.name || bookingRow?.customer_name || "",
+      postcode: bookingRow?.postcode || "",
+      address: bookingRow?.address || "",
+      service_label: bookingRow?.title || bookingRow?.service_name || bookingRow?.item_name || "your collection",
+      book_again_url: guessBookAgainUrl(bookingRow),
+      review_url: process.env.GOOGLE_REVIEW_URL || "https://www.arocwaste.co.uk/",
+      social_url: process.env.SOCIAL_URL || "https://www.arocwaste.co.uk/",
+      reply_to: recipient,
+      run_id: run_id,
+      completed_by_staff_email: email,
+    };
+
+    const scheduled_at = plusHoursISO(1);
+
+    // Dedupe is handled by the unique partial index (pending/sent). If it already exists, we ignore.
+    const { error: eIns } = await supabase.from("notification_queue").insert({
+      event_type: "booking_completed",
+      target_type: "booking",
+      target_id: booking_id,
+      recipient_email: recipient,
+      scheduled_at,
+      status: "pending",
+      payload,
+    });
+
+    // If duplicate, ignore — booking already queued/sent
+    if (eIns && !String(eIns.message || "").toLowerCase().includes("duplicate")) {
+      return res.status(500).json({ error: eIns.message });
+    }
+
+    return res.status(200).json({ ok: true, notification: "queued", scheduled_at });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to update booking" });
   }
