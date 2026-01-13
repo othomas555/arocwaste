@@ -1,5 +1,5 @@
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabaseClient } from "../../../lib/supabaseClient";
 
@@ -17,30 +17,55 @@ function cleanText(s) {
   return String(s || "").trim();
 }
 
-function buildNavDestination(item) {
-  const addr = cleanText(item?.address);
-  const pc = cleanText(item?.postcode);
-  const apiDest = cleanText(item?.nav_destination);
-  const dest = apiDest || [addr, pc].filter(Boolean).join(", ");
-  return dest || "";
+/** ---------- Offline queue (localStorage) ---------- **/
+const QUEUE_KEY = "aroc_driver_action_queue_v1";
+
+function safeParseJSON(s, fallback) {
+  try {
+    return JSON.parse(String(s || ""));
+  } catch {
+    return fallback;
+  }
 }
 
-function googleMapsNavUrl(destination) {
-  const dest = cleanText(destination);
-  if (!dest) return "";
-  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving&dir_action=navigate`;
+function loadQueue() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(QUEUE_KEY);
+    const arr = safeParseJSON(raw, []);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
 }
 
-const ISSUE_REASONS = [
-  "No access",
-  "Bin not out / customer missed",
-  "Contaminated / not acceptable",
-  "Overweight / too many bags",
-  "Wrong address",
-  "Customer asked to skip",
-  "Vehicle / time constraint",
-  "Other",
-];
+function saveQueue(q) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(QUEUE_KEY, JSON.stringify(Array.isArray(q) ? q : []));
+  } catch {
+    // ignore
+  }
+}
+
+function uid() {
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function actionKeyFor(a) {
+  // Used for pending UI: "sub:<id>" or "book:<id>"
+  if (a?.kind === "sub_mark" || a?.kind === "sub_undo") return `sub:${a.subscription_id}`;
+  if (a?.kind === "book_set") return `book:${a.booking_id}`;
+  return "";
+}
+
+function dedupeKeyFor(a) {
+  // If driver taps twice before sync, keep only the latest per stop.
+  // E.g. sub_mark then sub_undo -> keep the latest
+  if (a?.kind === "sub_mark" || a?.kind === "sub_undo") return `sub:${a.subscription_id}`;
+  if (a?.kind === "book_set") return `book:${a.booking_id}`;
+  return "";
+}
 
 export default function DriverRunPage() {
   const router = useRouter();
@@ -52,7 +77,7 @@ export default function DriverRunPage() {
   const [error, setError] = useState("");
 
   const [run, setRun] = useState(null);
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState([]); // merged ordered stops (bookings + subscriptions)
   const [totals, setTotals] = useState({
     totalStops: 0,
     totalExtraBags: 0,
@@ -60,9 +85,14 @@ export default function DriverRunPage() {
     totalCompletedBookings: 0,
   });
 
-  // per-stop issue input state
-  const [issueReasonByKey, setIssueReasonByKey] = useState({});
-  const [issueDetailsByKey, setIssueDetailsByKey] = useState({});
+  // Pending UI: { "sub:123": true, "book:abc": true }
+  const [pendingMap, setPendingMap] = useState({});
+  const pendingMapRef = useRef({});
+  useEffect(() => {
+    pendingMapRef.current = pendingMap;
+  }, [pendingMap]);
+
+  const processingRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -125,188 +155,250 @@ export default function DriverRunPage() {
     return `${run.vehicles.registration}${run.vehicles.name ? ` • ${run.vehicles.name}` : ""}`;
   }, [run]);
 
-  async function markCollected(subscription_id) {
-    setSavingKey(`sub:${subscription_id}`);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
+  /** ---------- Optimistic state helpers ---------- **/
+  function setStopOptimistic({ kind, subscription_id, booking_id, completed }) {
+    setItems((prev) => {
+      const next = (prev || []).map((it) => {
+        if (kind === "sub_mark" && it.type === "subscription" && String(it.id) === String(subscription_id)) {
+          return { ...it, collected: true };
+        }
+        if (kind === "sub_undo" && it.type === "subscription" && String(it.id) === String(subscription_id)) {
+          return { ...it, collected: false };
+        }
+        if (kind === "book_set" && it.type === "booking" && String(it.id) === String(booking_id)) {
+          return { ...it, completed_at: completed ? new Date().toISOString() : null };
+        }
+        return it;
+      });
+      return next;
+    });
 
+    // Update totals only for bookings completion count (subscriptions totals are “due”, not “completed”)
+    if (kind === "book_set") {
+      setTotals((t) => {
+        const current = Number(t?.totalCompletedBookings) || 0;
+        const wasCompleted = items.find((x) => x.type === "booking" && String(x.id) === String(booking_id))?.completed_at
+          ? true
+          : false;
+
+        // If we can't reliably know previous state, recompute from updated items is heavy; we do a best effort:
+        // - If completed=true and previously not completed => +1
+        // - If completed=false and previously completed => -1
+        let next = current;
+        if (completed && !wasCompleted) next = current + 1;
+        if (!completed && wasCompleted) next = Math.max(0, current - 1);
+
+        return { ...(t || {}), totalCompletedBookings: next };
+      });
+    }
+  }
+
+  function markPending(key, on) {
+    if (!key) return;
+    setPendingMap((prev) => {
+      const next = { ...(prev || {}) };
+      if (on) next[key] = true;
+      else delete next[key];
+      return next;
+    });
+  }
+
+  function rebuildPendingFromQueue() {
+    const q = loadQueue();
+    const m = {};
+    for (const a of q) {
+      const k = actionKeyFor(a);
+      if (k) m[k] = true;
+    }
+    setPendingMap(m);
+  }
+
+  /** ---------- Queue + processor ---------- **/
+  function enqueueAction(action) {
+    const a = { id: uid(), ts: Date.now(), attempt: 0, last_error: "", ...(action || {}) };
+    const dk = dedupeKeyFor(a);
+
+    const q = loadQueue();
+    const filtered = dk ? q.filter((x) => dedupeKeyFor(x) !== dk) : q;
+    const next = [...filtered, a];
+    saveQueue(next);
+
+    // Mark pending UI
+    const pk = actionKeyFor(a);
+    if (pk) markPending(pk, true);
+  }
+
+  async function performAction(a) {
+    const token = session?.access_token;
+    if (!token) throw new Error("Not logged in.");
+
+    if (a.kind === "sub_mark") {
       const res = await fetch("/api/driver/mark-collected", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          run_id: run?.id,
-          subscription_id,
-          collected_date: run?.run_date,
+          run_id: a.run_id,
+          subscription_id: a.subscription_id,
+          collected_date: a.collected_date,
         }),
       });
-
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json?.error || "Failed to mark collected");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to mark collected");
-    } finally {
-      setSavingKey("");
+      return true;
     }
-  }
 
-  async function undoCollected(subscription_id) {
-    setSavingKey(`sub:${subscription_id}`);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
+    if (a.kind === "sub_undo") {
       const res = await fetch("/api/driver/undo-collected", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          run_id: run?.id,
-          subscription_id,
-          collected_date: run?.run_date,
+          run_id: a.run_id,
+          subscription_id: a.subscription_id,
+          collected_date: a.collected_date,
         }),
       });
-
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json?.error || "Failed to undo");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to undo");
-    } finally {
-      setSavingKey("");
+      return true;
     }
-  }
 
-  async function setBookingCompleted(booking_id, completed) {
-    setSavingKey(`book:${booking_id}`);
-    setError("");
-    try {
-      const token = session?.access_token;
-      if (!token) throw new Error("Not logged in.");
-
+    if (a.kind === "book_set") {
       const res = await fetch("/api/driver/bookings/set-completed", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          run_id: run?.id,
-          booking_id,
-          completed,
+          run_id: a.run_id,
+          booking_id: a.booking_id,
+          completed: !!a.completed,
         }),
       });
-
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json?.error || "Failed to update booking");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to update booking");
-    } finally {
-      setSavingKey("");
+      return true;
     }
+
+    throw new Error("Unknown action");
   }
 
-  async function reportIssue(item) {
-    const token = session?.access_token;
-    if (!token) {
-      setError("Not logged in.");
-      return;
-    }
+  async function processQueueOnce() {
+    if (processingRef.current) return;
+    if (!session?.access_token) return;
+    processingRef.current = true;
 
-    const stop_type = item?.type;
-    const stop_id = String(item?.id || "");
-    const key = `${stop_type}:${stop_id}`;
-
-    const reason = cleanText(issueReasonByKey[key]) || cleanText(item?.issue_reason);
-    const details = cleanText(issueDetailsByKey[key]);
-
-    if (!reason) {
-      setError("Select an issue reason first.");
-      return;
-    }
-
-    setSavingKey(`issue:${key}`);
-    setError("");
     try {
-      const res = await fetch("/api/driver/stops/set-issue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          run_id: run?.id,
-          stop_type,
-          stop_id,
-          reason,
-          details,
-        }),
-      });
+      let q = loadQueue();
+      if (!q.length) {
+        // clean pending map if needed
+        if (Object.keys(pendingMapRef.current || {}).length) rebuildPendingFromQueue();
+        return;
+      }
 
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to report issue");
+      // Try in FIFO order
+      const nextQ = [];
+      let changed = false;
 
-      // clear local details field after save
-      setIssueDetailsByKey((prev) => ({ ...prev, [key]: "" }));
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to report issue");
+      for (const a of q) {
+        // If offline, stop early and keep remaining
+        if (typeof navigator !== "undefined" && navigator && navigator.onLine === false) {
+          nextQ.push(a);
+          continue;
+        }
+
+        try {
+          await performAction(a);
+          changed = true;
+
+          // Success: clear pending marker
+          const pk = actionKeyFor(a);
+          if (pk) markPending(pk, false);
+        } catch (e) {
+          const msg = e?.message || "Failed";
+          const attempt = Number(a.attempt) || 0;
+
+          // If it's a network-style failure, keep for retry.
+          // If it's a hard server error, we still keep it (ops wants resilience), but we surface a banner.
+          const keep = true;
+
+          const updated = {
+            ...a,
+            attempt: attempt + 1,
+            last_error: msg,
+            last_ts: Date.now(),
+          };
+
+          nextQ.push(keep ? updated : null);
+          changed = true;
+
+          // show a non-blocking warning
+          setError((prev) => {
+            const base = prev ? `${prev}\n` : "";
+            return `${base}Some actions are still syncing: ${msg}`;
+          });
+        }
+      }
+
+      const compact = nextQ.filter(Boolean);
+      if (changed) saveQueue(compact);
+
+      // If queue drained, optionally refresh from server to be 100% sure
+      if (!compact.length) {
+        // light refresh (keeps run accurate after being offline)
+        await load();
+      }
     } finally {
-      setSavingKey("");
+      processingRef.current = false;
     }
   }
 
-  async function clearIssue(item) {
-    const token = session?.access_token;
-    if (!token) {
-      setError("Not logged in.");
-      return;
+  // Build pending map at start + on login
+  useEffect(() => {
+    if (!session?.access_token) return;
+    rebuildPendingFromQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.access_token]);
+
+  // Retry loop: every 8 seconds + on coming online
+  useEffect(() => {
+    if (!session?.access_token) return;
+
+    const t = setInterval(() => {
+      const q = loadQueue();
+      if (q.length) processQueueOnce();
+    }, 8000);
+
+    function onOnline() {
+      processQueueOnce();
     }
 
-    const stop_type = item?.type;
-    const stop_id = String(item?.id || "");
-    const key = `${stop_type}:${stop_id}`;
-
-    setSavingKey(`issue:${key}`);
-    setError("");
-    try {
-      const res = await fetch("/api/driver/stops/clear-issue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          run_id: run?.id,
-          stop_type,
-          stop_id,
-        }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || "Failed to clear issue");
-
-      await load();
-    } catch (e) {
-      setError(e?.message || "Failed to clear issue");
-    } finally {
-      setSavingKey("");
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", onOnline);
     }
-  }
 
+    return () => {
+      clearInterval(t);
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", onOnline);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.access_token, run?.id]);
+
+  /** ---------- Existing actions, now queued + optimistic ---------- **/
   function isCompleted(item) {
     const isBooking = item?.type === "booking";
     return isBooking ? !!item?.completed_at : !!item?.collected;
   }
 
-  function hasIssue(item) {
-    return !!cleanText(item?.issue_reason);
+  function isPending(item) {
+    const k = item?.type === "booking" ? `book:${item.id}` : `sub:${item.id}`;
+    return !!pendingMap?.[k];
   }
 
   function cardTone(item) {
     const booking = item?.type === "booking";
     const done = isCompleted(item);
-    const issue = hasIssue(item);
 
     if (done) return "bg-white border-slate-200";
-    if (issue) return "bg-amber-50 border-amber-200";
     if (booking) return "bg-blue-50 border-blue-200";
     return "bg-red-50 border-red-200";
   }
@@ -323,10 +415,19 @@ export default function DriverRunPage() {
   function statusPill(item) {
     const booking = item?.type === "booking";
     const done = isCompleted(item);
+    const pending = isPending(item);
 
+    if (pending) return "bg-violet-600 text-white ring-violet-700";
     if (done) return "bg-slate-100 text-slate-700 ring-slate-200";
     if (booking) return "bg-blue-600 text-white ring-blue-700";
     return "bg-emerald-600 text-white ring-emerald-700";
+  }
+
+  function statusLabel(item) {
+    const done = isCompleted(item);
+    const pending = isPending(item);
+    if (pending) return "SYNCING";
+    return done ? "COMPLETED" : "DUE";
   }
 
   function stopTitle(item) {
@@ -351,6 +452,68 @@ export default function DriverRunPage() {
     return `Empty wheelie bin • ${own}`;
   }
 
+  async function markCollected(subscription_id) {
+    setError("");
+    if (!run?.id || !run?.run_date) {
+      setError("Run missing run_date/run_id");
+      return;
+    }
+
+    // optimistic
+    setStopOptimistic({ kind: "sub_mark", subscription_id });
+
+    // queue
+    enqueueAction({
+      kind: "sub_mark",
+      run_id: run.id,
+      subscription_id: String(subscription_id),
+      collected_date: String(run.run_date),
+    });
+
+    // attempt immediate sync (best effort)
+    processQueueOnce();
+  }
+
+  async function undoCollected(subscription_id) {
+    setError("");
+    if (!run?.id || !run?.run_date) {
+      setError("Run missing run_date/run_id");
+      return;
+    }
+
+    setStopOptimistic({ kind: "sub_undo", subscription_id });
+
+    enqueueAction({
+      kind: "sub_undo",
+      run_id: run.id,
+      subscription_id: String(subscription_id),
+      collected_date: String(run.run_date),
+    });
+
+    processQueueOnce();
+  }
+
+  async function setBookingCompleted(booking_id, completed) {
+    setError("");
+    if (!run?.id) {
+      setError("Run missing run_id");
+      return;
+    }
+
+    // optimistic
+    setStopOptimistic({ kind: "book_set", booking_id, completed: !!completed });
+
+    // queue
+    enqueueAction({
+      kind: "book_set",
+      run_id: run.id,
+      booking_id: String(booking_id),
+      completed: !!completed,
+    });
+
+    processQueueOnce();
+  }
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-4xl px-4 py-6">
@@ -367,7 +530,7 @@ export default function DriverRunPage() {
         </div>
 
         {error ? (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
+          <div className="mb-4 whitespace-pre-wrap rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
         ) : null}
 
         {!session?.access_token ? (
@@ -384,6 +547,7 @@ export default function DriverRunPage() {
           <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-700 shadow-sm">Run not found.</div>
         ) : (
           <>
+            {/* HEADER */}
             <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">
                 {run.route_area} • {run.route_day} • {String(run.route_slot || "ANY").toUpperCase()}
@@ -413,12 +577,30 @@ export default function DriverRunPage() {
                   <div className="text-lg font-semibold text-slate-900">{(items || []).length}</div>
                 </div>
               </div>
+
+              {/* Sync status */}
+              <div className="mt-3 text-xs text-slate-600">
+                {typeof navigator !== "undefined" && navigator && navigator.onLine === false ? (
+                  <span className="rounded-full bg-amber-100 px-2 py-1 font-semibold text-amber-900 ring-1 ring-amber-200">
+                    Offline — actions will sync when signal returns
+                  </span>
+                ) : Object.keys(pendingMap || {}).length ? (
+                  <span className="rounded-full bg-violet-100 px-2 py-1 font-semibold text-violet-900 ring-1 ring-violet-200">
+                    Syncing {Object.keys(pendingMap || {}).length} change{Object.keys(pendingMap || {}).length === 1 ? "" : "s"}…
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-emerald-50 px-2 py-1 font-semibold text-emerald-800 ring-1 ring-emerald-200">
+                    Up to date
+                  </span>
+                )}
+              </div>
             </div>
 
+            {/* LEGEND */}
             <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">Run sheet</div>
               <div className="mt-1 text-sm text-slate-600">
-                Red = wheelie bin collections. Blue = one-off jobs. Amber = issue flagged. Completed stops turn grey.
+                Red = wheelie bin collections. Blue = one-off jobs. Completed stops turn grey. SYNCING means it’s queued.
               </div>
             </div>
 
@@ -431,6 +613,7 @@ export default function DriverRunPage() {
                 {items.map((it, idx) => {
                   const booking = it.type === "booking";
                   const done = isCompleted(it);
+                  const pending = isPending(it);
                   const key = `${it.type}:${it.id}`;
 
                   const headline = stopTitle(it);
@@ -442,22 +625,11 @@ export default function DriverRunPage() {
                   const notes = cleanText(it.notes);
                   const opsNotes = cleanText(it.ops_notes);
 
-                  const navDest = buildNavDestination(it);
-                  const navUrl = googleMapsNavUrl(navDest);
-                  const navDisabled = !navUrl;
-
-                  const issueReason = cleanText(it.issue_reason);
-                  const issueDetails = cleanText(it.issue_details);
-
-                  const localReason = issueReasonByKey[key] ?? "";
-                  const localDetails = issueDetailsByKey[key] ?? "";
-
-                  const issueSaving = savingKey === `issue:${key}`;
-
                   return (
                     <div key={key} className={cx("rounded-2xl border p-4 shadow-sm", cardTone(it))}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
+                          {/* top row */}
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-slate-500 font-semibold">{idx + 1}.</span>
 
@@ -466,24 +638,26 @@ export default function DriverRunPage() {
                             </span>
 
                             <span className={cx("rounded-full px-2 py-1 text-[11px] font-semibold ring-1", statusPill(it))}>
-                              {done ? "COMPLETED" : "DUE"}
+                              {statusLabel(it)}
                             </span>
-
-                            {issueReason ? (
-                              <span className="rounded-full bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white ring-1 ring-amber-700">
-                                ISSUE
-                              </span>
-                            ) : null}
 
                             {booking && it.booking_ref ? (
                               <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
                                 {it.booking_ref}
                               </span>
                             ) : null}
+
+                            {pending ? (
+                              <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
+                                queued
+                              </span>
+                            ) : null}
                           </div>
 
+                          {/* headline */}
                           <div className="mt-2 text-base font-semibold text-slate-900">{headline}</div>
 
+                          {/* job line */}
                           <div className="mt-1 text-sm text-slate-800">
                             <span className="font-semibold">Job:</span> {jobLine}
                             {booking && it.total_pence != null ? (
@@ -494,20 +668,7 @@ export default function DriverRunPage() {
                             ) : null}
                           </div>
 
-                          {issueReason ? (
-                            <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-amber-200">
-                              <div className="text-xs text-amber-900">
-                                <span className="font-semibold">Issue:</span> {issueReason}
-                                {issueDetails ? (
-                                  <>
-                                    <span className="mx-2 text-amber-300">•</span>
-                                    <span className="text-amber-900">{issueDetails}</span>
-                                  </>
-                                ) : null}
-                              </div>
-                            </div>
-                          ) : null}
-
+                          {/* details */}
                           {booking ? (
                             <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
                               <div className="text-xs text-slate-700">
@@ -549,99 +710,10 @@ export default function DriverRunPage() {
                               </div>
                             </div>
                           ) : null}
-
-                          {/* Issue reporter (only when not completed) */}
-                          {!done ? (
-                            <div className="mt-3 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
-                              <div className="text-xs font-semibold text-slate-800">Problem / can’t collect</div>
-                              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
-                                <div className="md:col-span-1">
-                                  <label className="block text-[11px] font-semibold text-slate-600">Reason</label>
-                                  <select
-                                    value={localReason || ""}
-                                    onChange={(e) =>
-                                      setIssueReasonByKey((prev) => ({ ...prev, [key]: e.target.value }))
-                                    }
-                                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
-                                  >
-                                    <option value="">Select…</option>
-                                    {ISSUE_REASONS.map((r) => (
-                                      <option key={r} value={r}>
-                                        {r}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-
-                                <div className="md:col-span-2">
-                                  <label className="block text-[11px] font-semibold text-slate-600">Details (optional)</label>
-                                  <input
-                                    value={localDetails}
-                                    onChange={(e) =>
-                                      setIssueDetailsByKey((prev) => ({ ...prev, [key]: e.target.value }))
-                                    }
-                                    placeholder="Quick note (gate locked, bin missing, etc.)"
-                                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="mt-2 flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => reportIssue(it)}
-                                  disabled={issueSaving}
-                                  className={cx(
-                                    "rounded-lg px-3 py-2 text-sm font-semibold ring-1",
-                                    issueSaving
-                                      ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                      : "bg-amber-600 text-white ring-amber-700 hover:bg-amber-700"
-                                  )}
-                                >
-                                  {issueSaving ? "Saving…" : "Report issue"}
-                                </button>
-
-                                {issueReason ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => clearIssue(it)}
-                                    disabled={issueSaving}
-                                    className={cx(
-                                      "rounded-lg px-3 py-2 text-sm font-semibold ring-1",
-                                      issueSaving
-                                        ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                        : "bg-white text-slate-900 ring-slate-200 hover:bg-slate-50"
-                                    )}
-                                  >
-                                    Clear
-                                  </button>
-                                ) : null}
-                              </div>
-                            </div>
-                          ) : null}
                         </div>
 
-                        <div className="shrink-0 flex flex-col gap-2">
-                          {navDisabled ? (
-                            <button
-                              type="button"
-                              disabled
-                              className="rounded-xl px-3 py-2 text-sm font-semibold ring-1 bg-slate-200 text-slate-500 ring-slate-200"
-                              title="No address/postcode available for navigation"
-                            >
-                              Navigate
-                            </button>
-                          ) : (
-                            <a
-                              href={navUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="rounded-xl px-3 py-2 text-sm font-semibold ring-1 bg-white text-slate-900 ring-slate-200 hover:bg-slate-50 text-center"
-                            >
-                              Navigate
-                            </a>
-                          )}
-
+                        {/* buttons */}
+                        <div className="shrink-0 flex gap-2">
                           {booking ? (
                             done ? (
                               <button
@@ -650,9 +722,7 @@ export default function DriverRunPage() {
                                 disabled={savingKey === `book:${it.id}`}
                                 className={cx(
                                   "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  savingKey === `book:${it.id}`
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                  "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                                 )}
                               >
                                 Undo
@@ -664,9 +734,7 @@ export default function DriverRunPage() {
                                 disabled={savingKey === `book:${it.id}`}
                                 className={cx(
                                   "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                  savingKey === `book:${it.id}`
-                                    ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                    : "bg-slate-900 text-white ring-slate-900 hover:bg-black"
+                                  "bg-slate-900 text-white ring-slate-900 hover:bg-black"
                                 )}
                               >
                                 Completed
@@ -679,9 +747,7 @@ export default function DriverRunPage() {
                               disabled={savingKey === `sub:${it.id}`}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingKey === `sub:${it.id}`
-                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                  : "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
+                                "bg-amber-50 text-amber-900 ring-amber-200 hover:bg-amber-100"
                               )}
                             >
                               Undo
@@ -693,9 +759,7 @@ export default function DriverRunPage() {
                               disabled={savingKey === `sub:${it.id}`}
                               className={cx(
                                 "rounded-xl px-3 py-2 text-sm font-semibold ring-1",
-                                savingKey === `sub:${it.id}`
-                                  ? "bg-slate-200 text-slate-500 ring-slate-200"
-                                  : "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
+                                "bg-emerald-600 text-white ring-emerald-700 hover:bg-emerald-700"
                               )}
                             >
                               Collected
