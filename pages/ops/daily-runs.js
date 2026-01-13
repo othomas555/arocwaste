@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 
+const ALL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const SLOT_ORDER = { AM: 1, PM: 2, ANY: 3 };
 
 function cx(...xs) {
@@ -43,15 +44,10 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Total due keyed by "area|slot"
+  // breakdown keyed by "area|slot"
   const [dueCounts, setDueCounts] = useState({});
-
-  // Breakdown keyed by "area|slot"
-  const [breakdown, setBreakdown] = useState({
-    subscriptions: {},
-    bookings: {},
-    quotes: {},
-  });
+  const [subCounts, setSubCounts] = useState({});
+  const [bookingCounts, setBookingCounts] = useState({});
 
   const routeDay = useMemo(() => weekdayFromYMD(runDate), [runDate]);
 
@@ -59,7 +55,6 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
     const active = (routeAreas || []).filter((r) => r.active !== false);
     const todays = active.filter((r) => r.route_day === routeDay);
 
-    // Unique (area, slot) combos
     const map = new Map();
     for (const r of todays) {
       const area = String(r.name || "").trim();
@@ -97,25 +92,14 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
     setBusy(true);
     try {
       const r = await apiJSON(`/api/ops/day-summary?date=${encodeURIComponent(runDate)}`);
-
-      // Backward compatible:
       setDueCounts(r?.dueCounts || {});
-
-      // New breakdown (if present)
-      const bd = r?.breakdown || null;
-      if (bd) {
-        setBreakdown({
-          subscriptions: bd.subscriptions || {},
-          bookings: bd.bookings || {},
-          quotes: bd.quotes || {},
-        });
-      } else {
-        setBreakdown({ subscriptions: {}, bookings: {}, quotes: {} });
-      }
+      setSubCounts(r?.subCounts || {});
+      setBookingCounts(r?.bookingCounts || {});
     } catch (e) {
       setError(e?.message || "Failed to load day summary");
       setDueCounts({});
-      setBreakdown({ subscriptions: {}, bookings: {}, quotes: {} });
+      setSubCounts({});
+      setBookingCounts({});
     } finally {
       setBusy(false);
     }
@@ -146,11 +130,6 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
     }
   }
 
-  function bdCount(map, key) {
-    const n = Number(map?.[key] || 0);
-    return Number.isFinite(n) ? n : 0;
-  }
-
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-6xl px-4 py-6">
@@ -158,7 +137,7 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">Day planner</h1>
             <p className="text-sm text-gray-600">
-              Pick a date → see the work for that day → open a run → assign driver/team → tick off.
+              Pick a date → load jobs → open a run → assign driver/team → tick off.
             </p>
           </div>
 
@@ -232,13 +211,10 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
           {cards.length ? (
             cards.map((c) => {
               const key = `${c.area}|${c.slot}`;
+
+              const bins = Number(subCounts[key] || 0);
+              const oneoffs = Number(bookingCounts[key] || 0);
               const total = Number(dueCounts[key] || 0);
-
-              const subN = bdCount(breakdown.subscriptions, key);
-              const jobN = bdCount(breakdown.bookings, key);
-              const quoteN = bdCount(breakdown.quotes, key);
-
-              const hasBreakdown = subN + jobN + quoteN > 0 || Object.keys(breakdown.subscriptions || {}).length > 0;
 
               return (
                 <div key={key} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -249,28 +225,22 @@ export default function OpsDailyRuns({ initialRouteAreas }) {
                         {routeDay} • <span className="font-semibold">{c.slot}</span>
                       </div>
                     </div>
+
                     <div className="rounded-lg bg-gray-50 px-3 py-2 text-center">
-                      <div className="text-xs text-gray-500">Due</div>
-                      <div className="text-lg font-semibold text-gray-900">{Number.isFinite(total) ? total : 0}</div>
+                      <div className="text-xs text-gray-500">Total due</div>
+                      <div className="text-lg font-semibold text-gray-900">{total}</div>
                     </div>
                   </div>
 
-                  <div className="mt-3 text-xs text-gray-500">
-                    {hasBreakdown ? (
-                      <>
-                        Breakdown:{" "}
-                        <span className="font-semibold text-gray-700">subs {subN}</span>
-                        <span className="mx-1 text-gray-300">•</span>
-                        <span className="font-semibold text-gray-700">jobs {jobN}</span>
-                        <span className="mx-1 text-gray-300">•</span>
-                        <span className="font-semibold text-indigo-700">quotes {quoteN}</span>
-                      </>
-                    ) : (
-                      <>
-                        Due count includes <span className="font-semibold">subscriptions + bookings + quote visits</span>{" "}
-                        (load jobs to see totals).
-                      </>
-                    )}
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-lg bg-white p-3 ring-1 ring-gray-200">
+                      <div className="text-xs text-gray-500">Bins</div>
+                      <div className="text-base font-semibold text-gray-900">{bins}</div>
+                    </div>
+                    <div className="rounded-lg bg-white p-3 ring-1 ring-gray-200">
+                      <div className="text-xs text-gray-500">One-offs</div>
+                      <div className="text-base font-semibold text-gray-900">{oneoffs}</div>
+                    </div>
                   </div>
 
                   <div className="mt-4 flex gap-2">
