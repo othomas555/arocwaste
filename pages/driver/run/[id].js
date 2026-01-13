@@ -83,6 +83,9 @@ export default function DriverRunPage() {
     totalExtraBags: 0,
     totalBookings: 0,
     totalCompletedBookings: 0,
+    // optional (won't break if missing)
+    totalQuoteVisits: 0,
+    totalCompletedQuoteVisits: 0,
   });
 
   // Pending UI: { "sub:123": true, "book:abc": true }
@@ -133,13 +136,22 @@ export default function DriverRunPage() {
           totalExtraBags: 0,
           totalBookings: 0,
           totalCompletedBookings: 0,
+          totalQuoteVisits: 0,
+          totalCompletedQuoteVisits: 0,
         }
       );
     } catch (e) {
       setError(e?.message || "Load failed");
       setRun(null);
       setItems([]);
-      setTotals({ totalStops: 0, totalExtraBags: 0, totalBookings: 0, totalCompletedBookings: 0 });
+      setTotals({
+        totalStops: 0,
+        totalExtraBags: 0,
+        totalBookings: 0,
+        totalCompletedBookings: 0,
+        totalQuoteVisits: 0,
+        totalCompletedQuoteVisits: 0,
+      });
     } finally {
       setLoading(false);
     }
@@ -154,6 +166,15 @@ export default function DriverRunPage() {
     if (!run?.vehicles) return "— no vehicle —";
     return `${run.vehicles.registration}${run.vehicles.name ? ` • ${run.vehicles.name}` : ""}`;
   }, [run]);
+
+  /** ---------- Quote-visit detector ---------- **/
+  function isQuoteVisit(item) {
+    if (item?.type !== "booking") return false;
+    const bt = String(item?.booking_type || "").trim().toLowerCase();
+    if (bt === "quote_visit") return true;
+    if (item?.requires_visit === true) return true;
+    return false;
+  }
 
   /** ---------- Optimistic state helpers ---------- **/
   function setStopOptimistic({ kind, subscription_id, booking_id, completed }) {
@@ -181,9 +202,6 @@ export default function DriverRunPage() {
           ? true
           : false;
 
-        // If we can't reliably know previous state, recompute from updated items is heavy; we do a best effort:
-        // - If completed=true and previously not completed => +1
-        // - If completed=false and previously completed => -1
         let next = current;
         if (completed && !wasCompleted) next = current + 1;
         if (!completed && wasCompleted) next = Math.max(0, current - 1);
@@ -288,17 +306,14 @@ export default function DriverRunPage() {
     try {
       let q = loadQueue();
       if (!q.length) {
-        // clean pending map if needed
         if (Object.keys(pendingMapRef.current || {}).length) rebuildPendingFromQueue();
         return;
       }
 
-      // Try in FIFO order
       const nextQ = [];
       let changed = false;
 
       for (const a of q) {
-        // If offline, stop early and keep remaining
         if (typeof navigator !== "undefined" && navigator && navigator.onLine === false) {
           nextQ.push(a);
           continue;
@@ -308,16 +323,11 @@ export default function DriverRunPage() {
           await performAction(a);
           changed = true;
 
-          // Success: clear pending marker
           const pk = actionKeyFor(a);
           if (pk) markPending(pk, false);
         } catch (e) {
           const msg = e?.message || "Failed";
           const attempt = Number(a.attempt) || 0;
-
-          // If it's a network-style failure, keep for retry.
-          // If it's a hard server error, we still keep it (ops wants resilience), but we surface a banner.
-          const keep = true;
 
           const updated = {
             ...a,
@@ -326,10 +336,9 @@ export default function DriverRunPage() {
             last_ts: Date.now(),
           };
 
-          nextQ.push(keep ? updated : null);
+          nextQ.push(updated);
           changed = true;
 
-          // show a non-blocking warning
           setError((prev) => {
             const base = prev ? `${prev}\n` : "";
             return `${base}Some actions are still syncing: ${msg}`;
@@ -340,9 +349,7 @@ export default function DriverRunPage() {
       const compact = nextQ.filter(Boolean);
       if (changed) saveQueue(compact);
 
-      // If queue drained, optionally refresh from server to be 100% sure
       if (!compact.length) {
-        // light refresh (keeps run accurate after being offline)
         await load();
       }
     } finally {
@@ -397,8 +404,10 @@ export default function DriverRunPage() {
   function cardTone(item) {
     const booking = item?.type === "booking";
     const done = isCompleted(item);
+    const quote = isQuoteVisit(item);
 
     if (done) return "bg-white border-slate-200";
+    if (booking && quote) return "bg-purple-50 border-purple-200";
     if (booking) return "bg-blue-50 border-blue-200";
     return "bg-red-50 border-red-200";
   }
@@ -406,8 +415,10 @@ export default function DriverRunPage() {
   function typePill(item) {
     const booking = item?.type === "booking";
     const done = isCompleted(item);
+    const quote = isQuoteVisit(item);
 
     if (done) return "bg-slate-100 text-slate-700 ring-slate-200";
+    if (booking && quote) return "bg-purple-100 text-purple-900 ring-purple-200";
     if (booking) return "bg-blue-100 text-blue-900 ring-blue-200";
     return "bg-red-100 text-red-900 ring-red-200";
   }
@@ -440,8 +451,10 @@ export default function DriverRunPage() {
 
   function stopJobLine(item) {
     const booking = item?.type === "booking";
+    const quote = isQuoteVisit(item);
 
     if (booking) {
+      if (quote) return "Site visit for quote (visit required)";
       const desc = cleanText(item?.description);
       return desc || "One-off collection";
     }
@@ -459,10 +472,8 @@ export default function DriverRunPage() {
       return;
     }
 
-    // optimistic
     setStopOptimistic({ kind: "sub_mark", subscription_id });
 
-    // queue
     enqueueAction({
       kind: "sub_mark",
       run_id: run.id,
@@ -470,7 +481,6 @@ export default function DriverRunPage() {
       collected_date: String(run.run_date),
     });
 
-    // attempt immediate sync (best effort)
     processQueueOnce();
   }
 
@@ -500,10 +510,8 @@ export default function DriverRunPage() {
       return;
     }
 
-    // optimistic
     setStopOptimistic({ kind: "book_set", booking_id, completed: !!completed });
 
-    // queue
     enqueueAction({
       kind: "book_set",
       run_id: run.id,
@@ -513,6 +521,17 @@ export default function DriverRunPage() {
 
     processQueueOnce();
   }
+
+  // optional: quote counts (safe if not present)
+  const quoteCount = useMemo(() => {
+    if (Number(totals?.totalQuoteVisits) > 0) return Number(totals.totalQuoteVisits);
+    return (items || []).filter((x) => isQuoteVisit(x)).length;
+  }, [items, totals]);
+
+  const quoteCompletedCount = useMemo(() => {
+    if (Number(totals?.totalCompletedQuoteVisits) > 0) return Number(totals.totalCompletedQuoteVisits);
+    return (items || []).filter((x) => isQuoteVisit(x) && !!x.completed_at).length;
+  }, [items, totals]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -558,7 +577,7 @@ export default function DriverRunPage() {
                 <span className="font-medium text-slate-700">{vehicleLabel}</span>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+              <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Wheelie bins</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalStops || 0}</div>
@@ -571,6 +590,11 @@ export default function DriverRunPage() {
                   <div className="text-xs font-semibold text-slate-600">One-off jobs</div>
                   <div className="text-lg font-semibold text-slate-900">{totals.totalBookings || 0}</div>
                   <div className="text-xs text-slate-500">{totals.totalCompletedBookings || 0} completed</div>
+                </div>
+                <div className="rounded-xl bg-purple-50 p-3 ring-1 ring-purple-200">
+                  <div className="text-xs font-semibold text-purple-700">Quote visits</div>
+                  <div className="text-lg font-semibold text-slate-900">{quoteCount || 0}</div>
+                  <div className="text-xs text-purple-800">{quoteCompletedCount || 0} completed</div>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
                   <div className="text-xs font-semibold text-slate-600">Total stops</div>
@@ -600,7 +624,7 @@ export default function DriverRunPage() {
             <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="text-base font-semibold text-slate-900">Run sheet</div>
               <div className="mt-1 text-sm text-slate-600">
-                Red = wheelie bin collections. Blue = one-off jobs. Completed stops turn grey. SYNCING means it’s queued.
+                Red = wheelie bin collections. Blue = one-off jobs. Purple = quote visits. Completed stops turn grey. SYNCING means it’s queued.
               </div>
             </div>
 
@@ -614,6 +638,7 @@ export default function DriverRunPage() {
                   const booking = it.type === "booking";
                   const done = isCompleted(it);
                   const pending = isPending(it);
+                  const quote = isQuoteVisit(it);
                   const key = `${it.type}:${it.id}`;
 
                   const headline = stopTitle(it);
@@ -634,7 +659,7 @@ export default function DriverRunPage() {
                             <span className="text-slate-500 font-semibold">{idx + 1}.</span>
 
                             <span className={cx("rounded-full px-2 py-1 text-[11px] font-extrabold tracking-wide ring-1", typePill(it))}>
-                              {booking ? "ONE-OFF" : "WHEELIE BIN"}
+                              {booking ? (quote ? "QUOTE VISIT" : "ONE-OFF") : "WHEELIE BIN"}
                             </span>
 
                             <span className={cx("rounded-full px-2 py-1 text-[11px] font-semibold ring-1", statusPill(it))}>
@@ -660,7 +685,7 @@ export default function DriverRunPage() {
                           {/* job line */}
                           <div className="mt-1 text-sm text-slate-800">
                             <span className="font-semibold">Job:</span> {jobLine}
-                            {booking && it.total_pence != null ? (
+                            {booking && it.total_pence != null && !quote ? (
                               <>
                                 <span className="mx-2 text-slate-300">•</span>
                                 <span className="font-semibold">{moneyGBP(it.total_pence)}</span>
@@ -702,6 +727,12 @@ export default function DriverRunPage() {
                               ) : (
                                 <div className="mt-2 text-xs text-slate-500">No notes</div>
                               )}
+
+                              {quote ? (
+                                <div className="mt-2 text-xs font-semibold text-purple-900">
+                                  Visit required — take photos + notes, quote will be raised after.
+                                </div>
+                              ) : null}
                             </div>
                           ) : opsNotes ? (
                             <div className="mt-2 rounded-xl bg-white/60 p-3 ring-1 ring-slate-200">
