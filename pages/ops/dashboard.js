@@ -1,5 +1,6 @@
 // pages/ops/dashboard.js
 import Link from "next/link";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 function classNames(...xs) {
   return xs.filter(Boolean).join(" ");
@@ -22,6 +23,7 @@ export default function OpsDashboard({
   billingIssueCount,
   subscriberCount,
   openOpsIssueCount,
+  newClearanceQuoteCount,
 }) {
   const cards = [
     {
@@ -63,6 +65,23 @@ export default function OpsDashboard({
           )}
         >
           {openOpsIssueCount || 0} open
+        </span>
+      ),
+    },
+
+    // ✅ NEW: Clearance Quotes + badge
+    {
+      title: "Clearance quotes",
+      desc: "Requests from /clearances. View details and update status.",
+      href: "/ops/clearance-quotes",
+      right: (
+        <span
+          className={classNames(
+            "rounded-md px-2 py-1 text-xs font-semibold",
+            (newClearanceQuoteCount || 0) > 0 ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"
+          )}
+        >
+          {newClearanceQuoteCount || 0} new
         </span>
       ),
     },
@@ -130,6 +149,18 @@ export default function OpsDashboard({
               className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
             >
               Open Subscribers
+            </Link>
+
+            <Link
+              href="/ops/clearance-quotes"
+              className={classNames(
+                "rounded-lg px-3 py-2 text-sm font-semibold",
+                (newClearanceQuoteCount || 0) > 0
+                  ? "bg-amber-600 text-white hover:bg-amber-700"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700"
+              )}
+            >
+              Clearance quotes {(newClearanceQuoteCount || 0) > 0 ? `(${newClearanceQuoteCount})` : ""}
             </Link>
 
             <Link
@@ -261,6 +292,7 @@ export async function getServerSideProps(ctx) {
   let billingIssueCount = 0;
   let subscriberCount = 0;
   let openOpsIssueCount = 0;
+  let newClearanceQuoteCount = 0;
 
   // 1) Subscriber + billing audit counts (existing behaviour)
   try {
@@ -286,7 +318,7 @@ export async function getServerSideProps(ctx) {
     // keep defaults
   }
 
-  // 2) Open ops issue count (NEW)
+  // 2) Open ops issue count (existing behaviour)
   try {
     const res = await fetch(`${baseUrl}/api/ops/issues/count-open`, {
       headers: {
@@ -303,12 +335,26 @@ export async function getServerSideProps(ctx) {
     // keep default
   }
 
+  // 3) NEW: Clearance quote "new" count (server-side, using admin client)
+  try {
+    const supabase = getSupabaseAdmin();
+    const { count, error } = await supabase
+      .from("clearance_quotes")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "new");
+
+    if (!error) newClearanceQuoteCount = Number(count) || 0;
+  } catch {
+    // keep default
+  }
+
   return {
     props: {
       todayDate,
       billingIssueCount,
       subscriberCount,
       openOpsIssueCount,
+      newClearanceQuoteCount,
     },
   };
 }
