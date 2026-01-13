@@ -1,6 +1,7 @@
 // pages/bins-bags.js
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import Layout from "../components/layout";
 
 function classNames(...xs) {
   return xs.filter(Boolean).join(" ");
@@ -172,10 +173,7 @@ export default function BinsBags() {
   const [submitError, setSubmitError] = useState("");
 
   const covered = checked && routeResult?.in_area && routeResult?.default;
-  const matchesSorted = useMemo(
-    () => sortMatches(routeResult?.matches),
-    [routeResult?.matches]
-  );
+  const matchesSorted = useMemo(() => sortMatches(routeResult?.matches), [routeResult?.matches]);
 
   const routeDay = routeResult?.default?.route_day || null;
   const startOptions = useMemo(() => {
@@ -298,305 +296,274 @@ export default function BinsBags() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-3xl px-4 py-8">
-        <div className="mb-6 flex items-end justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-semibold text-gray-900">Bins & Bags</h1>
-            <p className="mt-1 text-sm text-gray-600">
-              Domestic bin collections — simple, reliable, ops-first.
-            </p>
-          </div>
-          <Link
-            href="/my-bins"
-            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
-          >
-            Customer portal
-          </Link>
-        </div>
-
-        {/* Postcode check */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-900">1) Check your postcode</h2>
-          <p className="mt-1 text-xs text-gray-600">
-            We’ll confirm your collection area and time before you subscribe.
-          </p>
-
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <input
-              value={postcode}
-              onChange={(e) => setPostcode(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-              placeholder="e.g. CF71 7AA"
-            />
-            <button
-              type="button"
-              onClick={onCheckPostcode}
-              disabled={checking}
-              className={classNames(
-                "rounded-lg px-4 py-2 text-sm font-semibold",
-                checking ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
-              )}
-            >
-              {checking ? "Checking…" : "Check"}
-            </button>
-          </div>
-
-          {checkError ? (
-            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-              {checkError}
+    <Layout>
+      <div className="min-h-screen bg-gray-50">
+        <div className="mx-auto max-w-3xl px-4 py-8">
+          <div className="mb-6 flex items-end justify-between gap-4">
+            <div>
+              <h1 className="text-3xl font-semibold text-gray-900">Bins & Bags</h1>
+              <p className="mt-1 text-sm text-gray-600">Domestic bin collections — simple, reliable, ops-first.</p>
             </div>
-          ) : null}
+            <Link
+              href="/my-bins"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+            >
+              Customer portal
+            </Link>
+          </div>
 
-          {covered ? (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-              <div className="font-semibold">✅ We cover {routeResult.postcode}.</div>
+          {/* Postcode check */}
+          <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">1) Check your postcode</h2>
+            <p className="mt-1 text-xs text-gray-600">We’ll confirm your collection area and time before you subscribe.</p>
 
-              <div className="mt-2">
-                <div className="text-sm">
-                  <span className="font-semibold">Area:</span>{" "}
-                  {routeResult.default.route_area}
-                </div>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                value={postcode}
+                onChange={(e) => setPostcode(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                placeholder="e.g. CF71 7AA"
+              />
+              <button
+                type="button"
+                onClick={onCheckPostcode}
+                disabled={checking}
+                className={classNames(
+                  "rounded-lg px-4 py-2 text-sm font-semibold",
+                  checking ? "bg-gray-400 text-white" : "bg-gray-900 text-white hover:bg-black"
+                )}
+              >
+                {checking ? "Checking…" : "Check"}
+              </button>
+            </div>
 
-                <div className="mt-2 text-sm">
-                  <div className="font-semibold">Collections:</div>
-                  <ul className="mt-1 list-disc pl-5">
-                    {matchesSorted.map((m, i) => (
-                      <li key={`${m.route_area_id || i}-${m.route_day}-${m.slot}-${i}`}>
-                        {m.route_day}
-                        {m.slot && m.slot !== "ANY" ? ` ${m.slot}` : ""}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+            {checkError ? (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{checkError}</div>
+            ) : null}
 
-                <div className="mt-3 rounded-xl bg-white/60 p-3 text-xs text-emerald-900">
-                  <div className="font-semibold">Choose your first collection start date</div>
-                  <div className="mt-1 text-emerald-800">
-                    Your normal collection day is{" "}
-                    <span className="font-semibold">{routeDay}</span>.
+            {covered ? (
+              <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                <div className="font-semibold">✅ We cover {routeResult.postcode}.</div>
+
+                <div className="mt-2">
+                  <div className="text-sm">
+                    <span className="font-semibold">Area:</span> {routeResult.default.route_area}
                   </div>
 
-                  <div className="mt-2">
-                    <select
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900"
-                    >
-                      {startOptions.map((ymd) => (
-                        <option key={ymd} value={ymd}>
-                          {formatStartOption(ymd)}
-                        </option>
+                  <div className="mt-2 text-sm">
+                    <div className="font-semibold">Collections:</div>
+                    <ul className="mt-1 list-disc pl-5">
+                      {matchesSorted.map((m, i) => (
+                        <li key={`${m.route_area_id || i}-${m.route_day}-${m.slot}-${i}`}>
+                          {m.route_day}
+                          {m.slot && m.slot !== "ANY" ? ` ${m.slot}` : ""}
+                        </li>
                       ))}
-                    </select>
-                    <div className="mt-1 text-xs text-emerald-800">
-                      This will be your <span className="font-semibold">first</span> collection date.
+                    </ul>
+                  </div>
+
+                  <div className="mt-3 rounded-xl bg-white/60 p-3 text-xs text-emerald-900">
+                    <div className="font-semibold">Choose your first collection start date</div>
+                    <div className="mt-1 text-emerald-800">
+                      Your normal collection day is <span className="font-semibold">{routeDay}</span>.
+                    </div>
+
+                    <div className="mt-2">
+                      <select
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900"
+                      >
+                        {startOptions.map((ymd) => (
+                          <option key={ymd} value={ymd}>
+                            {formatStartOption(ymd)}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="mt-1 text-xs text-emerald-800">
+                        This will be your <span className="font-semibold">first</span> collection date.
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          <div className="mt-3 text-xs text-gray-500">
-            If you’re out of area, you can still contact us — we may expand coverage.
+            <div className="mt-3 text-xs text-gray-500">
+              If you’re out of area, you can still contact us — we may expand coverage.
+            </div>
           </div>
-        </div>
 
-        {/* Subscription form */}
-        <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-900">2) Choose your plan</h2>
-          <p className="mt-1 text-xs text-gray-600">
-            Card payments only. You can manage, pause, or cancel in the customer portal.
-          </p>
+          {/* Subscription form */}
+          <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">2) Choose your plan</h2>
+            <p className="mt-1 text-xs text-gray-600">Card payments only. You can manage, pause, or cancel in the customer portal.</p>
 
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold text-gray-700">Frequency</label>
-              <select
-                value={frequency}
-                onChange={(e) => setFrequency(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-              >
-                <option value="weekly">Weekly</option>
-                <option value="fortnightly">Fortnightly</option>
-                <option value="threeweekly">3-weekly</option>
-              </select>
-              <div className="mt-1 text-xs text-gray-500">
-                Billed {frequencyLabel(frequency)}.
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Frequency</label>
+                <select
+                  value={frequency}
+                  onChange={(e) => setFrequency(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                >
+                  <option value="weekly">Weekly</option>
+                  <option value="fortnightly">Fortnightly</option>
+                  <option value="threeweekly">3-weekly</option>
+                </select>
+                <div className="mt-1 text-xs text-gray-500">Billed {frequencyLabel(frequency)}.</div>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
-              <input
-                type="number"
-                min={0}
-                max={10}
-                value={extraBags}
-                onChange={(e) => setExtraBags(clampInt(e.target.value, 0, 10))}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-              />
-              <div className="mt-1 text-xs text-gray-500">0–10</div>
-            </div>
-
-            <div className="sm:col-span-2">
-              <label className="flex items-center gap-2 text-sm text-gray-900">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Extra bags</label>
                 <input
-                  type="checkbox"
-                  checked={useOwnBin}
-                  onChange={(e) => setUseOwnBin(e.target.checked)}
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={extraBags}
+                  onChange={(e) => setExtraBags(clampInt(e.target.value, 0, 10))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
                 />
-                I’ll use my own bin (no deposit)
-              </label>
-            </div>
-          </div>
-
-          {/* Exact Stripe-aligned pricing breakdown */}
-          <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-900">
-            <div className="text-sm font-semibold">Pricing (exact)</div>
-
-            <div className="mt-2 space-y-1 text-sm">
-              <div className="flex items-center justify-between">
-                <div>Bin collection ({frequencyLabel(frequency)})</div>
-                <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bin)}</div>
+                <div className="mt-1 text-xs text-gray-500">0–10</div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <div>
-                  Extra bags ({clampInt(extraBags, 0, 10)} × {fmtGBP(STRIPE_PRICES.bag)} {frequencyLabel(frequency)})
+              <div className="sm:col-span-2">
+                <label className="flex items-center gap-2 text-sm text-gray-900">
+                  <input type="checkbox" checked={useOwnBin} onChange={(e) => setUseOwnBin(e.target.checked)} />
+                  I’ll use my own bin (no deposit)
+                </label>
+              </div>
+            </div>
+
+            {/* Exact Stripe-aligned pricing breakdown */}
+            <div className="mt-4 rounded-xl bg-gray-50 p-4 text-sm text-gray-900">
+              <div className="text-sm font-semibold">Pricing (exact)</div>
+
+              <div className="mt-2 space-y-1 text-sm">
+                <div className="flex items-center justify-between">
+                  <div>Bin collection ({frequencyLabel(frequency)})</div>
+                  <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bin)}</div>
                 </div>
-                <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bag * clampInt(extraBags, 0, 10))}</div>
-              </div>
 
-              <div className="flex items-center justify-between">
-                <div>Bin deposit (one-off)</div>
-                <div className="font-semibold">{fmtGBP(depositApplied ? STRIPE_PRICES.deposit : 0)}</div>
-              </div>
-            </div>
-
-            <div className="mt-3 border-t border-gray-200 pt-3">
-              <div className="flex items-center justify-between">
-                <div className="font-semibold">Due today at checkout</div>
-                <div className="text-lg font-semibold">{fmtGBP(dueTodayAtCheckout)}</div>
-              </div>
-
-              <div className="mt-1 text-xs text-gray-600">
-                Then <span className="font-semibold">{fmtGBP(recurringPerCycle)}</span>{" "}
-                {frequencyLabel(frequency)} (until cancelled).
-              </div>
-
-              {!covered ? (
-                <div className="mt-2 text-xs text-amber-700">
-                  Pricing will apply once your postcode is confirmed in-area.
+                <div className="flex items-center justify-between">
+                  <div>
+                    Extra bags ({clampInt(extraBags, 0, 10)} × {fmtGBP(STRIPE_PRICES.bag)} {frequencyLabel(frequency)})
+                  </div>
+                  <div className="font-semibold">{fmtGBP(STRIPE_PRICES.bag * clampInt(extraBags, 0, 10))}</div>
                 </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
 
-        {/* Customer details */}
-        <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-900">3) Your details</h2>
+                <div className="flex items-center justify-between">
+                  <div>Bin deposit (one-off)</div>
+                  <div className="font-semibold">{fmtGBP(depositApplied ? STRIPE_PRICES.deposit : 0)}</div>
+                </div>
+              </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-semibold text-gray-700">Address</label>
-              <input
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                placeholder="House number + street + town"
-              />
-            </div>
+              <div className="mt-3 border-t border-gray-200 pt-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold">Due today at checkout</div>
+                  <div className="text-lg font-semibold">{fmtGBP(dueTodayAtCheckout)}</div>
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-700">Email</label>
-              <input
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                placeholder="you@example.com"
-              />
-            </div>
+                <div className="mt-1 text-xs text-gray-600">
+                  Then <span className="font-semibold">{fmtGBP(recurringPerCycle)}</span> {frequencyLabel(frequency)} (until cancelled).
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-700">Name (optional)</label>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                placeholder="Owain"
-              />
-            </div>
-
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-semibold text-gray-700">Phone (optional)</label>
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
-                placeholder="07..."
-              />
+                {!covered ? (
+                  <div className="mt-2 text-xs text-amber-700">Pricing will apply once your postcode is confirmed in-area.</div>
+                ) : null}
+              </div>
             </div>
           </div>
 
-          {submitError ? (
-            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-              {submitError}
-            </div>
-          ) : null}
+          {/* Customer details */}
+          <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">3) Your details</h2>
 
-          <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs text-gray-500">
-              By subscribing, you agree to recurring charges until cancelled.
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-gray-700">Address</label>
+                <input
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="House number + street + town"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Email</label>
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="you@example.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700">Name (optional)</label>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="Owain"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-gray-700">Phone (optional)</label>
+                <input
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  placeholder="07..."
+                />
+              </div>
             </div>
 
-            <button
-              type="button"
-              onClick={subscribe}
-              disabled={submitting || !covered || !startDate}
-              className={classNames(
-                "rounded-lg px-5 py-2 text-sm font-semibold",
-                submitting || !covered || !startDate
-                  ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-                  : "bg-gray-900 text-white hover:bg-black"
-              )}
-              title={
-                !covered
-                  ? "Check your postcode first"
-                  : !startDate
-                  ? "Choose your first collection date"
-                  : "Continue to payment"
-              }
+            {submitError ? (
+              <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{submitError}</div>
+            ) : null}
+
+            <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-xs text-gray-500">By subscribing, you agree to recurring charges until cancelled.</div>
+
+              <button
+                type="button"
+                onClick={subscribe}
+                disabled={submitting || !covered || !startDate}
+                className={classNames(
+                  "rounded-lg px-5 py-2 text-sm font-semibold",
+                  submitting || !covered || !startDate
+                    ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+                    : "bg-gray-900 text-white hover:bg-black"
+                )}
+                title={!covered ? "Check your postcode first" : !startDate ? "Choose your first collection date" : "Continue to payment"}
+              >
+                {submitting ? "Redirecting…" : "Continue to payment"}
+              </button>
+            </div>
+
+            {!covered ? (
+              <div className="mt-2 text-xs text-gray-500">You must check your postcode and be in-area before subscribing.</div>
+            ) : null}
+
+            {covered && !startDate ? (
+              <div className="mt-2 text-xs text-gray-500">Choose your first collection date before continuing.</div>
+            ) : null}
+          </div>
+
+          <div className="mt-6 text-center text-xs text-gray-500">
+            Ops? Go to{" "}
+            <Link
+              href="/ops/dashboard"
+              className="font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
             >
-              {submitting ? "Redirecting…" : "Continue to payment"}
-            </button>
+              /ops/dashboard
+            </Link>
           </div>
-
-          {!covered ? (
-            <div className="mt-2 text-xs text-gray-500">
-              You must check your postcode and be in-area before subscribing.
-            </div>
-          ) : null}
-
-          {covered && !startDate ? (
-            <div className="mt-2 text-xs text-gray-500">
-              Choose your first collection date before continuing.
-            </div>
-          ) : null}
-        </div>
-
-        <div className="mt-6 text-center text-xs text-gray-500">
-          Ops? Go to{" "}
-          <Link
-            href="/ops/dashboard"
-            className="font-medium text-gray-900 underline decoration-gray-300 hover:decoration-gray-900"
-          >
-            /ops/dashboard
-          </Link>
         </div>
       </div>
-    </div>
+    </Layout>
   );
 }
