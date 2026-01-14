@@ -1,3 +1,4 @@
+// pages/api/driver/undo-collected.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
 function getBearerToken(req) {
@@ -63,7 +64,17 @@ export default async function handler(req, res) {
 
     if (eDel) return res.status(500).json({ error: eDel.message });
 
-    return res.status(200).json({ ok: true });
+    // cancel any pending queued email for this specific collection date
+    const target_id = `${subscription_id}:${collected_date}`;
+    await supabase
+      .from("notification_queue")
+      .update({ status: "cancelled", cancelled_at: new Date().toISOString() })
+      .eq("event_type", "subscription_collected")
+      .eq("target_type", "subscription")
+      .eq("target_id", target_id)
+      .eq("status", "pending");
+
+    return res.status(200).json({ ok: true, notification: "cancelled_if_pending" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to undo collected" });
   }
