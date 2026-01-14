@@ -6,14 +6,22 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
+function safeText(x) {
+  return String(x ?? "").trim();
+}
+
 function addHoursIso(hours) {
   const d = new Date();
   d.setHours(d.getHours() + hours);
   return d.toISOString();
 }
 
-function safeText(x) {
-  return String(x ?? "").trim();
+function buildAddress(row) {
+  const direct = safeText(row?.address);
+  if (direct) return direct;
+
+  const parts = [safeText(row?.address_1), safeText(row?.address_2), safeText(row?.town)].filter(Boolean);
+  return parts.join(", ");
 }
 
 export default async function handler(req, res) {
@@ -70,44 +78,42 @@ export default async function handler(req, res) {
 
     if (eIns) return res.status(500).json({ error: eIns.message });
 
-    // Lookup subscriber info for email payload
-    const { data: subRow, error: eSub } = await supabase
-      .from("subscriptions")
-      .select("id,email,name,postcode,address_1,address_2,town")
-      .eq("id", subscription_id)
-      .maybeSingle();
+    // ✅ queue email (+1 hour) (best-effort; does not block)
+    try {
+      const { data: subRow } = await supabase
+        .from("subscriptions")
+        .select("id,email,name,postcode,address,address_1,address_2,town")
+        .eq("id", subscription_id)
+        .maybeSingle();
 
-    if (!eSub && subRow && safeText(subRow.email)) {
-      const name = safeText(subRow.name);
-      const postcode = safeText(subRow.postcode);
-      const addrParts = [
-        safeText(subRow.address_1),
-        safeText(subRow.address_2),
-        safeText(subRow.town),
-      ].filter(Boolean);
-      const address = addrParts.join(", ");
+      const recipient = safeText(subRow?.email);
+      if (recipient) {
+        const payload = {
+          name: safeText(subRow?.name),
+          postcode: safeText(subRow?.postcode),
+          address: buildAddress(subRow),
+          collected_date,
 
-      // Insert notification for +1 hour (undo window)
-      const payload = {
-        name: name || "",
-        postcode,
-        address,
-        collected_date,
-        book_again_url: "https://www.arocwaste.co.uk/bins-bags",
-        review_url: "https://www.arocwaste.co.uk/review",
-        social_url: "https://www.arocwaste.co.uk/",
-        reply_to: "hello@arocwaste.co.uk",
-      };
+          book_again_url: "https://www.arocwaste.co.uk/bins-bags",
+          review_url: "https://www.arocwaste.co.uk/review",
+          social_url: "https://www.arocwaste.co.uk/",
+          reply_to: "hello@arocwaste.co.uk",
 
-      await supabase.from("notification_queue").insert({
-        event_type: "subscription_collected",
-        target_type: "subscription",
-        target_id: subscription_id,
-        recipient_email: safeText(subRow.email),
-        payload,
-        scheduled_at: addHoursIso(1),
-        status: "pending",
-      });
+          service_label: "your wheelie bin collection",
+        };
+
+        await supabase.from("notification_queue").insert({
+          event_type: "subscription_collected",
+          target_type: "subscription",
+          target_id: subscription_id,
+          recipient_email: recipient,
+          payload,
+          scheduled_at: addHoursIso(1),
+          status: "pending",
+        });
+      }
+    } catch {
+      // best-effort
     }
 
     return res.status(200).json({ ok: true });
