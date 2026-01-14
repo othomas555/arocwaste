@@ -11,6 +11,26 @@ function asStr(x) {
   return String(x || "").trim();
 }
 
+function getAllowedOpsDomains() {
+  // Comma-separated list, e.g. "cox-skips.co.uk,arocwaste.co.uk"
+  // If not set, default to cox-skips.co.uk
+  const raw = process.env.OPS_ALLOWED_EMAIL_DOMAINS || "cox-skips.co.uk";
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function emailAllowed(email) {
+  const e = String(email || "").trim().toLowerCase();
+  if (!e.includes("@")) return false;
+  const domain = e.split("@").pop();
+  if (!domain) return false;
+
+  const allowed = getAllowedOpsDomains();
+  return allowed.includes(domain);
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") {
@@ -36,24 +56,14 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "Invalid or expired token" });
     }
 
-    const userId = userData.user.id;
-
-    // Authorize: only Ops/admin/staff
-    // NOTE: assumes you have profiles(id uuid pk, role text)
-    const { data: profile, error: profErr } = await supabaseAdmin
-      .from("profiles")
-      .select("id, role")
-      .eq("id", userId)
-      .maybeSingle();
-
-    if (profErr) {
-      return res.status(500).json({ ok: false, error: `Failed to read profile: ${profErr.message}` });
-    }
-
-    const role = (profile?.role || "").toLowerCase();
-    const allowed = ["ops", "admin", "staff"];
-    if (!allowed.includes(role)) {
-      return res.status(403).json({ ok: false, error: "Forbidden" });
+    // Authorize: only Ops/staff emails (keeps this endpoint locked down without needing profiles table)
+    const email = userData.user.email || "";
+    if (!emailAllowed(email)) {
+      return res.status(403).json({
+        ok: false,
+        error: "Forbidden",
+        detail: `Email domain not allowed for Ops access.`,
+      });
     }
 
     // Filters
@@ -62,9 +72,9 @@ export default async function handler(req, res) {
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
 
-    const status = asStr(req.query.status); // queued|sent|cancelled|failed
+    const status = asStr(req.query.status);
     const eventType = asStr(req.query.event_type);
-    const q = asStr(req.query.q); // search string: email, target_id, event_type
+    const q = asStr(req.query.q);
     const targetType = asStr(req.query.target_type);
     const targetId = asStr(req.query.target_id);
 
@@ -81,10 +91,8 @@ export default async function handler(req, res) {
     if (targetType) query = query.eq("target_type", targetType);
     if (targetId) query = query.eq("target_id", targetId);
 
-    // Simple search across a few useful fields.
-    // NOTE: Using OR requires PostgREST syntax; keep it minimal and safe.
     if (q) {
-      const esc = q.replace(/,/g, ""); // avoid breaking OR syntax
+      const esc = q.replace(/,/g, "");
       query = query.or(
         `recipient_email.ilike.%${esc}%,target_id.ilike.%${esc}%,event_type.ilike.%${esc}%`
       );
