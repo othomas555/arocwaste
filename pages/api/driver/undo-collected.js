@@ -1,4 +1,3 @@
-// pages/api/driver/undo-collected.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
 function getBearerToken(req) {
@@ -44,7 +43,6 @@ export default async function handler(req, res) {
     if (staffRow.active === false) return res.status(403).json({ error: "Staff is inactive" });
 
     // must be assigned to run
-    // IMPORTANT FIX: column is run_id (NOT daily_run_id)
     const { data: link, error: eLink } = await supabase
       .from("daily_run_staff")
       .select("run_id")
@@ -64,17 +62,17 @@ export default async function handler(req, res) {
 
     if (eDel) return res.status(500).json({ error: eDel.message });
 
-    // cancel any pending queued email for this specific collection date
-    const target_id = `${subscription_id}:${collected_date}`;
+    // cancel pending notification(s) for this collection date if not yet sent
     await supabase
       .from("notification_queue")
-      .update({ status: "cancelled", cancelled_at: new Date().toISOString() })
+      .update({ status: "cancelled", last_error: "Cancelled by undo" })
       .eq("event_type", "subscription_collected")
       .eq("target_type", "subscription")
-      .eq("target_id", target_id)
-      .eq("status", "pending");
+      .eq("target_id", subscription_id)
+      .eq("status", "pending")
+      .contains("payload", { collected_date });
 
-    return res.status(200).json({ ok: true, notification: "cancelled_if_pending" });
+    return res.status(200).json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to undo collected" });
   }
