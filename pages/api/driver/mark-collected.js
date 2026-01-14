@@ -6,7 +6,7 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
-function safeText(x) {
+function s(x) {
   return String(x ?? "").trim();
 }
 
@@ -16,11 +16,24 @@ function addHoursIso(hours) {
   return d.toISOString();
 }
 
+function pickFirst(row, keys) {
+  for (const k of keys) {
+    const v = s(row?.[k]);
+    if (v) return v;
+  }
+  return "";
+}
+
 function buildAddress(row) {
-  const direct = safeText(row?.address);
+  const direct = pickFirst(row, ["address", "full_address"]);
   if (direct) return direct;
 
-  const parts = [safeText(row?.address_1), safeText(row?.address_2), safeText(row?.town)].filter(Boolean);
+  const parts = [
+    pickFirst(row, ["address_1", "address1", "address_line_1", "line1"]),
+    pickFirst(row, ["address_2", "address2", "address_line_2", "line2"]),
+    pickFirst(row, ["town", "city"]),
+  ].filter(Boolean);
+
   return parts.join(", ");
 }
 
@@ -78,45 +91,75 @@ export default async function handler(req, res) {
 
     if (eIns) return res.status(500).json({ error: eIns.message });
 
-    // ✅ queue email (+1 hour) (best-effort; does not block)
+    // ✅ queue email (+1 hour) with DEBUG
+    let notif = { attempted: true, queued: false, reason: "", queue_id: null };
+
     try {
-      const { data: subRow } = await supabase
+      // Pull the subscription row (select * so we don’t fail if column names differ)
+      const { data: subRow, error: subErr } = await supabase
         .from("subscriptions")
-        .select("id,email,name,postcode,address,address_1,address_2,town")
+        .select("*")
         .eq("id", subscription_id)
         .maybeSingle();
 
-      const recipient = safeText(subRow?.email);
-      if (recipient) {
-        const payload = {
-          name: safeText(subRow?.name),
-          postcode: safeText(subRow?.postcode),
-          address: buildAddress(subRow),
-          collected_date,
+      if (subErr) {
+        notif.reason = `Failed to load subscription: ${subErr.message}`;
+      } else if (!subRow) {
+        notif.reason = "No subscription row found";
+      } else {
+        const recipient = pickFirst(subRow, [
+          "email",
+          "customer_email",
+          "billing_email",
+          "stripe_email",
+          "contact_email",
+        ]);
 
-          book_again_url: "https://www.arocwaste.co.uk/bins-bags",
-          review_url: "https://www.arocwaste.co.uk/review",
-          social_url: "https://www.arocwaste.co.uk/",
-          reply_to: "hello@arocwaste.co.uk",
+        if (!recipient) {
+          notif.reason =
+            "No recipient email found on subscriptions row (checked: email/customer_email/billing_email/stripe_email/contact_email)";
+        } else {
+          const payload = {
+            name: pickFirst(subRow, ["name", "full_name", "customer_name", "contact_name"]),
+            postcode: pickFirst(subRow, ["postcode", "post_code", "postal_code"]),
+            address: buildAddress(subRow),
+            collected_date,
 
-          service_label: "your wheelie bin collection",
-        };
+            book_again_url: "https://www.arocwaste.co.uk/bins-bags",
+            review_url: "https://www.arocwaste.co.uk/review",
+            social_url: "https://www.arocwaste.co.uk/",
+            reply_to: "hello@arocwaste.co.uk",
 
-        await supabase.from("notification_queue").insert({
-          event_type: "subscription_collected",
-          target_type: "subscription",
-          target_id: subscription_id,
-          recipient_email: recipient,
-          payload,
-          scheduled_at: addHoursIso(1),
-          status: "pending",
-        });
+            service_label: "your wheelie bin collection",
+          };
+
+          const { data: qRow, error: qErr } = await supabase
+            .from("notification_queue")
+            .insert({
+              event_type: "subscription_collected",
+              target_type: "subscription",
+              target_id: subscription_id,
+              recipient_email: recipient,
+              payload,
+              scheduled_at: addHoursIso(1),
+              status: "pending",
+            })
+            .select("id")
+            .maybeSingle();
+
+          if (qErr) {
+            notif.reason = `Queue insert failed: ${qErr.message}`;
+          } else {
+            notif.queued = true;
+            notif.queue_id = qRow?.id || null;
+          }
+        }
       }
-    } catch {
-      // best-effort
+    } catch (e) {
+      notif.reason = `Queue exception: ${String(e?.message || e)}`;
     }
 
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, notification: notif });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Failed to mark collected" });
   }
