@@ -62,15 +62,31 @@ export default async function handler(req, res) {
 
     if (eDel) return res.status(500).json({ error: eDel.message });
 
-    // cancel pending notification(s) for this collection date if not yet sent
-    await supabase
-      .from("notification_queue")
-      .update({ status: "cancelled", last_error: "Cancelled by undo" })
-      .eq("event_type", "subscription_collected")
-      .eq("target_type", "subscription")
-      .eq("target_id", subscription_id)
-      .eq("status", "pending")
-      .contains("payload", { collected_date });
+    // ✅ cancel queued email(s) for this collection (best-effort)
+    // Try to cancel specifically for the same collected_date, else cancel any pending for this subscription.
+    try {
+      const q1 = await supabase
+        .from("notification_queue")
+        .update({ status: "cancelled", last_error: "Cancelled by undo" })
+        .eq("event_type", "subscription_collected")
+        .eq("target_type", "subscription")
+        .eq("target_id", subscription_id)
+        .eq("status", "pending")
+        .eq("payload->>collected_date", collected_date);
+
+      if (q1?.error) {
+        // fallback: cancel all pending for this subscription
+        await supabase
+          .from("notification_queue")
+          .update({ status: "cancelled", last_error: "Cancelled by undo" })
+          .eq("event_type", "subscription_collected")
+          .eq("target_type", "subscription")
+          .eq("target_id", subscription_id)
+          .eq("status", "pending");
+      }
+    } catch {
+      // best-effort
+    }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
