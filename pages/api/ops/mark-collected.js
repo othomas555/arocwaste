@@ -1,4 +1,3 @@
-// pages/api/ops/mark-collected.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
 function parseISODateOrNull(s) {
@@ -9,37 +8,28 @@ function parseISODateOrNull(s) {
   return s; // YYYY-MM-DD
 }
 
-function isEmail(s) {
-  const x = String(s || "").trim();
-  if (!x) return false;
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
-}
-
-function plusHoursISO(hours) {
+function addHoursIso(hours) {
   const d = new Date();
-  d.setHours(d.getHours() + Number(hours || 0));
+  d.setHours(d.getHours() + hours);
   return d.toISOString();
 }
 
-function todayYMD() {
-  return new Date().toISOString().slice(0, 10);
+function safeText(x) {
+  return String(x ?? "").trim();
 }
 
-async function loadSubscriptionForEmail(supabase, subscription_id) {
-  const tryTables = ["subscriptions", "subscribers"];
+function buildAddress(row) {
+  // Try a few common patterns without breaking if columns don’t exist
+  const direct = safeText(row?.address);
+  if (direct) return direct;
 
-  for (const t of tryTables) {
-    const { data, error } = await supabase
-      .from(t)
-      .select("*")
-      .eq("id", subscription_id)
-      .maybeSingle();
+  const parts = [
+    safeText(row?.address_1),
+    safeText(row?.address_2),
+    safeText(row?.town),
+  ].filter(Boolean);
 
-    if (error) continue;
-    if (data) return data;
-  }
-
-  return null;
+  return parts.join(", ");
 }
 
 export default async function handler(req, res) {
@@ -76,45 +66,48 @@ export default async function handler(req, res) {
     if (collectedDate) rpcArgs.p_collected_date = collectedDate;
 
     const { data, error } = await supabase.rpc("mark_subscription_collected", rpcArgs);
-
     if (error) throw new Error(error.message);
 
     const row = Array.isArray(data) ? data[0] : null;
 
-    // Queue delayed email (1 hour) if subscriber has a valid email
-    const usedDate = collectedDate || todayYMD();
-    const subRow = await loadSubscriptionForEmail(supabase, subscriptionId);
-    const recipient = String(subRow?.email || "").trim();
+    // ✅ Queue notification (+1 hour) (best-effort)
+    try {
+      const { data: subRow } = await supabase
+        .from("subscriptions")
+        .select("id,email,name,postcode,address,address_1,address_2,town")
+        .eq("id", subscriptionId)
+        .maybeSingle();
 
-    if (isEmail(recipient)) {
-      const scheduled_at = plusHoursISO(1);
-      const target_id = `${subscriptionId}:${usedDate}`;
+      const recipient = safeText(subRow?.email);
+      if (recipient) {
+        const payload = {
+          name: safeText(subRow?.name),
+          postcode: safeText(subRow?.postcode),
+          address: buildAddress(subRow),
+          collected_date: collectedDate || "",
 
-      const payload = {
-        subscription_id: subscriptionId,
-        collected_date: usedDate,
-        postcode: subRow?.postcode || "",
-        address: subRow?.address || "",
-        name: subRow?.name || subRow?.customer_name || "",
-        service_label: "your wheelie bin collection",
-        book_again_url: "https://www.arocwaste.co.uk/bins-bags",
-        review_url: process.env.GOOGLE_REVIEW_URL || "https://www.arocwaste.co.uk/",
-        social_url: process.env.SOCIAL_URL || "https://www.arocwaste.co.uk/",
-        reply_to: recipient,
-        completed_by_staff_email: "ops",
-      };
+          // links
+          book_again_url: "https://www.arocwaste.co.uk/bins-bags",
+          review_url: "https://www.arocwaste.co.uk/review",
+          social_url: "https://www.arocwaste.co.uk/",
+          reply_to: "hello@arocwaste.co.uk",
 
-      const { error: eQ } = await supabase.from("notification_queue").insert({
-        event_type: "subscription_collected",
-        target_type: "subscription",
-        target_id,
-        recipient_email: recipient,
-        scheduled_at,
-        status: "pending",
-        payload,
-      });
+          // optional label
+          service_label: "your wheelie bin collection",
+        };
 
-      if (eQ) throw new Error(eQ.message);
+        await supabase.from("notification_queue").insert({
+          event_type: "subscription_collected",
+          target_type: "subscription",
+          target_id: subscriptionId,
+          recipient_email: recipient,
+          payload,
+          scheduled_at: addHoursIso(1),
+          status: "pending",
+        });
+      }
+    } catch {
+      // best-effort: don’t block marking collected
     }
 
     return res.status(200).json({
