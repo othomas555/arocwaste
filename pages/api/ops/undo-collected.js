@@ -1,4 +1,3 @@
-// pages/api/ops/undo-collected.js
 import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
 
 export default async function handler(req, res) {
@@ -35,20 +34,24 @@ export default async function handler(req, res) {
 
     const row = Array.isArray(data) ? data[0] : null;
 
-    // Cancel ANY pending queued email(s) for this subscription (we don't know the exact date here)
-    await supabase
-      .from("notification_queue")
-      .update({ status: "cancelled", cancelled_at: new Date().toISOString() })
-      .eq("event_type", "subscription_collected")
-      .eq("target_type", "subscription")
-      .like("target_id", `${subscriptionId}:%`)
-      .eq("status", "pending");
+    // ✅ Cancel any pending queued email(s) for this subscription
+    // (We don’t know the exact collected_date that was undone, so cancel all pending ones for this sub.)
+    try {
+      await supabase
+        .from("notification_queue")
+        .update({ status: "cancelled", last_error: "Cancelled by undo" })
+        .eq("event_type", "subscription_collected")
+        .eq("target_type", "subscription")
+        .eq("target_id", subscriptionId)
+        .eq("status", "pending");
+    } catch {
+      // best-effort
+    }
 
     return res.status(200).json({
       ok: true,
       subscriptionId,
       next_collection_date: row?.next_collection_date || null,
-      notification: "cancelled_if_pending",
     });
   } catch (e) {
     return res.status(400).json({ error: e.message || "Bad request" });
