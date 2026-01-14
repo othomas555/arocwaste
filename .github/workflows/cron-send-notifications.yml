@@ -1,6 +1,19 @@
-- name: Ping cron endpoint
-  run: |
-    code=$(curl -sS -o /dev/null -w "%{http_code}" \
-      "https://www.arocwaste.co.uk/api/cron/send-notifications?secret=${CRON_SECRET}")
-    echo "HTTP status: $code"
-    test "$code" = "200"
+name: Cron - Send Notifications
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping cron endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          code=$(curl -sS -o /dev/null -w "%{http_code}" \
+            "https://www.arocwaste.co.uk/api/cron/send-notifications?secret=${CRON_SECRET}")
+          echo "HTTP status: $code"
+          test "$code" = "200"
