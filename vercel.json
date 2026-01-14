@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/cron/send-notifications?secret=aroc-cron-2026-keep-private",
-      "schedule": "*/5 * * * *"
+      "path": "/api/cron/send-notifications",
+      "schedule": "0 * * * *"
     }
   ]
 }
