@@ -51,6 +51,36 @@ function getCronAuthToken(req) {
   return "";
 }
 
+/**
+ * Replace {{key}} placeholders with values from payload.
+ * - Unknown keys become ""
+ * - Values are stringified
+ * - Simple + predictable (no logic, no loops)
+ */
+function renderTemplate(str, payload) {
+  const src = String(str || "");
+  const data = payload && typeof payload === "object" ? payload : {};
+  return src.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
+    const v = data[key];
+    if (v === null || v === undefined) return "";
+    return String(v);
+  });
+}
+
+async function loadEmailTemplateOverride(supabase, eventType) {
+  const et = String(eventType || "").trim();
+  if (!et) return null;
+
+  const { data, error } = await supabase
+    .from("email_templates")
+    .select("event_type, subject, body_html, body_text")
+    .eq("event_type", et)
+    .maybeSingle();
+
+  if (error) return null; // fail soft (fallback to code templates)
+  return data || null;
+}
+
 function buildBookingCompletedEmail(payload) {
   const name = safeText(payload?.name, "there");
   const bookingRef = safeText(payload?.booking_ref, "");
@@ -117,7 +147,9 @@ function buildSubscriptionCollectedEmail(payload) {
 
   const subject = `✅ Bin collected — thanks from AROC Waste`;
 
-  const dateLine = collectedDate ? `<p style="margin:0 0 10px 0;"><strong>Date:</strong> ${collectedDate}</p>` : "";
+  const dateLine = collectedDate
+    ? `<p style="margin:0 0 10px 0;"><strong>Date:</strong> ${collectedDate}</p>`
+    : "";
 
   const html = `
     <div style="font-family: Arial, sans-serif; line-height: 1.4;">
@@ -181,8 +213,10 @@ export default async function handler(req, res) {
 
   const { data: rows, error } = await supabase
     .from("notification_queue")
-    .select("id,event_type,target_type,target_id,recipient_email,payload,scheduled_at,status")
+    .select("id,event_type,target_type,target_id,recipient_email,payload,scheduled_at,status,cancelled_at,sent_at")
     .eq("status", "pending")
+    .is("cancelled_at", null)
+    .is("sent_at", null)
     .lte("scheduled_at", nowIso)
     .order("scheduled_at", { ascending: true })
     .limit(50);
@@ -196,32 +230,38 @@ export default async function handler(req, res) {
 
   for (const n of items) {
     // Safety: if it was cancelled between fetch + send, skip it.
-    if (n.status !== "pending") {
+    if (n.status !== "pending" || n.cancelled_at || n.sent_at) {
       skipped++;
       continue;
     }
 
     let subject = "AROC Waste update";
     let html = "<p>Update</p>";
-    let replyTo = "";
+    let replyTo = safeText(n.payload?.reply_to, "");
 
-    if (n.event_type === "booking_completed") {
-      const built = buildBookingCompletedEmail(n.payload || {});
-      subject = built.subject;
-      html = built.html;
-      replyTo = safeText(n.payload?.reply_to, "");
-    } else if (n.event_type === "subscription_collected") {
-      const built = buildSubscriptionCollectedEmail(n.payload || {});
-      subject = built.subject;
-      html = built.html;
-      replyTo = safeText(n.payload?.reply_to, "");
+    // 1) Try template override
+    const tpl = await loadEmailTemplateOverride(supabase, n.event_type);
+    if (tpl && tpl.subject && tpl.body_html) {
+      subject = renderTemplate(tpl.subject, n.payload || {});
+      html = renderTemplate(tpl.body_html, n.payload || {});
     } else {
-      await supabase
-        .from("notification_queue")
-        .update({ status: "failed", last_error: "Unknown event_type", sent_at: null })
-        .eq("id", n.id);
-      failed++;
-      continue;
+      // 2) Fallback to built-in templates (existing behaviour)
+      if (n.event_type === "booking_completed") {
+        const built = buildBookingCompletedEmail(n.payload || {});
+        subject = built.subject;
+        html = built.html;
+      } else if (n.event_type === "subscription_collected") {
+        const built = buildSubscriptionCollectedEmail(n.payload || {});
+        subject = built.subject;
+        html = built.html;
+      } else {
+        await supabase
+          .from("notification_queue")
+          .update({ status: "failed", last_error: "Unknown event_type", sent_at: null })
+          .eq("id", n.id);
+        failed++;
+        continue;
+      }
     }
 
     const result = await sendResendEmail({
