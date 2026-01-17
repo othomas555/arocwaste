@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 export const config = {
-  matcher: ["/ops/:path*"],
+  matcher: ["/ops/:path*", "/api/ops/:path*"],
 };
 
 function unauthorized() {
