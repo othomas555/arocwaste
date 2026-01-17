@@ -1,7 +1,6 @@
 // pages/ops/notifications.js
-import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { supabaseClient } from "../../lib/supabaseClient";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 function cx(...xs) {
   return xs.filter(Boolean).join(" ");
@@ -11,7 +10,13 @@ function fmtDT(s) {
   if (!s) return "—";
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return String(s);
-  return d.toLocaleString("en-GB", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString("en-GB", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function StatusPill({ status }) {
@@ -28,114 +33,27 @@ function StatusPill({ status }) {
   return <span className={cx(base, cls)}>{status || "—"}</span>;
 }
 
-export default function OpsNotificationsPage() {
-  const [session, setSession] = useState(null);
-  const [loadingSession, setLoadingSession] = useState(true);
+export default function OpsNotificationsPage({
+  rows,
+  total,
+  page,
+  pageSize,
+  filters,
+  error,
+}) {
+  const totalPages = Math.max(1, Math.ceil((Number(total || 0) || 0) / (Number(pageSize) || 25)));
 
-  const [rows, setRows] = useState([]);
-  const [total, setTotal] = useState(0);
-
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  // Filters
-  const [status, setStatus] = useState("");
-  const [eventType, setEventType] = useState("");
-  const [q, setQ] = useState("");
-  const [targetType, setTargetType] = useState("");
-  const [targetId, setTargetId] = useState("");
-
-  // Paging
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-
-  const totalPages = useMemo(() => {
-    const n = Math.max(1, Math.ceil((total || 0) / pageSize));
-    return n;
-  }, [total, pageSize]);
-
-  useEffect(() => {
-    let alive = true;
-
-    async function boot() {
-      try {
-        if (!supabaseClient) {
-          if (alive) {
-            setError("Supabase client not configured (missing NEXT_PUBLIC env vars).");
-            setLoadingSession(false);
-          }
-          return;
-        }
-
-        const { data } = await supabaseClient.auth.getSession();
-        if (!alive) return;
-        setSession(data?.session || null);
-      } finally {
-        if (alive) setLoadingSession(false);
-      }
-    }
-
-    boot();
-
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  async function load() {
-    setLoading(true);
-    setError("");
-
-    try {
-      if (!session?.access_token) {
-        setError("You are not signed in.");
-        setRows([]);
-        setTotal(0);
-        return;
-      }
-
-      const params = new URLSearchParams();
-      params.set("page", String(page));
-      params.set("pageSize", String(pageSize));
-      if (status) params.set("status", status);
-      if (eventType) params.set("event_type", eventType);
-      if (q) params.set("q", q);
-      if (targetType) params.set("target_type", targetType);
-      if (targetId) params.set("target_id", targetId);
-
-      const res = await fetch(`/api/ops/notifications?${params.toString()}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-        },
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || `Request failed (${res.status})`);
-      }
-
-      setRows(Array.isArray(json.rows) ? json.rows : []);
-      setTotal(Number(json.total || 0));
-    } catch (e) {
-      setError(e?.message || "Failed to load notifications");
-      setRows([]);
-      setTotal(0);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!loadingSession) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingSession, page, pageSize, status, eventType, targetType, targetId]);
-
-  function onApplySearch(e) {
-    e.preventDefault();
-    setPage(1);
-    load();
-  }
+  const qs = (next) => {
+    const p = new URLSearchParams();
+    p.set("page", String(next.page ?? page));
+    p.set("pageSize", String(next.pageSize ?? pageSize));
+    if (next.status ?? filters.status) p.set("status", String(next.status ?? filters.status));
+    if (next.event_type ?? filters.event_type) p.set("event_type", String(next.event_type ?? filters.event_type));
+    if (next.target_type ?? filters.target_type) p.set("target_type", String(next.target_type ?? filters.target_type));
+    if (next.target_id ?? filters.target_id) p.set("target_id", String(next.target_id ?? filters.target_id));
+    if (next.q ?? filters.q) p.set("q", String(next.q ?? filters.q));
+    return `/ops/notifications?${p.toString()}`;
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -143,46 +61,37 @@ export default function OpsNotificationsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Notifications</h1>
           <p className="text-sm text-gray-600">
-            Read-only view of queued/sent/cancelled emails from <code className="px-1 py-0.5 bg-gray-100 rounded">notification_queue</code>.
+            Read-only view of queued/sent/cancelled emails from{" "}
+            <code className="px-1 py-0.5 bg-gray-100 rounded">notification_queue</code>.
           </p>
         </div>
         <div className="flex items-center gap-3">
           <Link href="/ops" className="text-sm underline">
             Back to Ops
           </Link>
-          <button
-            onClick={load}
-            className="text-sm px-3 py-2 rounded bg-black text-white disabled:opacity-50"
-            disabled={loading || loadingSession}
+          <Link
+            href={qs({})}
+            className="text-sm px-3 py-2 rounded bg-black text-white"
           >
             Refresh
-          </button>
+          </Link>
         </div>
       </div>
 
-      {loadingSession ? (
-        <div className="text-sm text-gray-600">Loading session…</div>
-      ) : !session ? (
-        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-amber-900 text-sm">
-          You’re not signed in. Open an Ops page that signs you in, then come back here.
+      {error ? (
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-red-900 text-sm">
+          {error}
         </div>
       ) : null}
 
-      {error ? (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-red-900 text-sm">{error}</div>
-      ) : null}
-
-      <form onSubmit={onApplySearch} className="rounded border p-4 space-y-3">
+      <form method="GET" className="rounded border p-4 space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <div>
             <label className="block text-xs text-gray-600 mb-1">Status</label>
             <select
               className="w-full border rounded px-2 py-2 text-sm"
-              value={status}
-              onChange={(e) => {
-                setPage(1);
-                setStatus(e.target.value);
-              }}
+              name="status"
+              defaultValue={filters.status || ""}
             >
               <option value="">All</option>
               <option value="queued">queued</option>
@@ -198,11 +107,8 @@ export default function OpsNotificationsPage() {
             <input
               className="w-full border rounded px-2 py-2 text-sm"
               placeholder="e.g. subscription_collected"
-              value={eventType}
-              onChange={(e) => {
-                setPage(1);
-                setEventType(e.target.value);
-              }}
+              name="event_type"
+              defaultValue={filters.event_type || ""}
             />
           </div>
 
@@ -211,11 +117,8 @@ export default function OpsNotificationsPage() {
             <input
               className="w-full border rounded px-2 py-2 text-sm"
               placeholder="e.g. subscription"
-              value={targetType}
-              onChange={(e) => {
-                setPage(1);
-                setTargetType(e.target.value);
-              }}
+              name="target_type"
+              defaultValue={filters.target_type || ""}
             />
           </div>
 
@@ -224,11 +127,8 @@ export default function OpsNotificationsPage() {
             <input
               className="w-full border rounded px-2 py-2 text-sm"
               placeholder="exact match"
-              value={targetId}
-              onChange={(e) => {
-                setPage(1);
-                setTargetId(e.target.value);
-              }}
+              name="target_id"
+              defaultValue={filters.target_id || ""}
             />
           </div>
 
@@ -237,8 +137,8 @@ export default function OpsNotificationsPage() {
             <input
               className="w-full border rounded px-2 py-2 text-sm"
               placeholder="email / target_id / event_type"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
+              name="q"
+              defaultValue={filters.q || ""}
             />
           </div>
         </div>
@@ -248,19 +148,17 @@ export default function OpsNotificationsPage() {
             <label className="text-xs text-gray-600">Page size</label>
             <select
               className="border rounded px-2 py-1 text-sm"
-              value={pageSize}
-              onChange={(e) => {
-                setPage(1);
-                setPageSize(Number(e.target.value) || 25);
-              }}
+              name="pageSize"
+              defaultValue={String(pageSize || 25)}
             >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
             </select>
+            <input type="hidden" name="page" value="1" />
           </div>
 
-          <button className="text-sm px-3 py-2 rounded border" type="submit" disabled={loading}>
+          <button className="text-sm px-3 py-2 rounded border" type="submit">
             Apply search
           </button>
         </div>
@@ -272,23 +170,21 @@ export default function OpsNotificationsPage() {
             Showing <b>{rows.length}</b> of <b>{total}</b>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              className="px-2 py-1 text-sm rounded border disabled:opacity-50"
-              disabled={loading || page <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            <Link
+              className={cx("px-2 py-1 text-sm rounded border", page <= 1 ? "pointer-events-none opacity-50" : "")}
+              href={qs({ page: Math.max(1, page - 1) })}
             >
               Prev
-            </button>
+            </Link>
             <div className="text-sm">
               Page <b>{page}</b> / <b>{totalPages}</b>
             </div>
-            <button
-              className="px-2 py-1 text-sm rounded border disabled:opacity-50"
-              disabled={loading || page >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            <Link
+              className={cx("px-2 py-1 text-sm rounded border", page >= totalPages ? "pointer-events-none opacity-50" : "")}
+              href={qs({ page: Math.min(totalPages, page + 1) })}
             >
               Next
-            </button>
+            </Link>
           </div>
         </div>
 
@@ -309,13 +205,7 @@ export default function OpsNotificationsPage() {
               </tr>
             </thead>
             <tbody>
-              {loading ? (
-                <tr>
-                  <td className="p-4 text-gray-600" colSpan={10}>
-                    Loading…
-                  </td>
-                </tr>
-              ) : rows.length === 0 ? (
+              {rows.length === 0 ? (
                 <tr>
                   <td className="p-4 text-gray-600" colSpan={10}>
                     No notifications found.
@@ -367,4 +257,77 @@ export default function OpsNotificationsPage() {
       </div>
     </div>
   );
+}
+
+export async function getServerSideProps(ctx) {
+  try {
+    const q = ctx.query || {};
+    const page = Math.max(1, Math.min(5000, Number(q.page || 1) || 1));
+    const pageSize = Math.max(25, Math.min(100, Number(q.pageSize || 25) || 25));
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    const filters = {
+      status: String(q.status || "").trim(),
+      event_type: String(q.event_type || "").trim(),
+      target_type: String(q.target_type || "").trim(),
+      target_id: String(q.target_id || "").trim(),
+      q: String(q.q || "").trim(),
+    };
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) {
+      return { props: { rows: [], total: 0, page, pageSize, filters, error: "Supabase admin not configured" } };
+    }
+
+    let query = supabase
+      .from("notification_queue")
+      .select(
+        "id, created_at, event_type, target_type, target_id, recipient_email, scheduled_at, status, sent_at, cancelled_at, last_error, payload",
+        { count: "exact" }
+      )
+      .order("created_at", { ascending: false });
+
+    if (filters.status) query = query.eq("status", filters.status);
+    if (filters.event_type) query = query.eq("event_type", filters.event_type);
+    if (filters.target_type) query = query.eq("target_type", filters.target_type);
+    if (filters.target_id) query = query.eq("target_id", filters.target_id);
+
+    if (filters.q) {
+      const esc = filters.q.replace(/,/g, "");
+      query = query.or(
+        `recipient_email.ilike.%${esc}%,target_id.ilike.%${esc}%,event_type.ilike.%${esc}%`
+      );
+    }
+
+    query = query.range(from, to);
+
+    const { data, error, count } = await query;
+
+    if (error) {
+      return { props: { rows: [], total: 0, page, pageSize, filters, error: error.message } };
+    }
+
+    return {
+      props: {
+        rows: data || [],
+        total: Number(count || 0),
+        page,
+        pageSize,
+        filters,
+        error: "",
+      },
+    };
+  } catch (e) {
+    return {
+      props: {
+        rows: [],
+        total: 0,
+        page: 1,
+        pageSize: 25,
+        filters: { status: "", event_type: "", target_type: "", target_id: "", q: "" },
+        error: e?.message || "Failed to load notifications",
+      },
+    };
+  }
 }
