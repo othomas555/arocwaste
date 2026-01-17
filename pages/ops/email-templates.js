@@ -1,5 +1,5 @@
 // pages/api/ops/email-templates.js
-import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
 
 function s(x) {
   return String(x || "").trim();
