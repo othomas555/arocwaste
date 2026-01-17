@@ -86,7 +86,7 @@ export default function OpsDashboard({
       ),
     },
 
-    // ✅ NEW: Notifications (read-only)
+    // ✅ Notifications (read-only)
     {
       title: "Notifications",
       desc: "View queued/sent/cancelled emails and any failures.",
@@ -94,6 +94,18 @@ export default function OpsDashboard({
       right: (
         <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
           Queue
+        </span>
+      ),
+    },
+
+    // ✅ Email templates (editable)
+    {
+      title: "Email templates",
+      desc: "Edit customer emails by event type (optional overrides).",
+      href: "/ops/email-templates",
+      right: (
+        <span className="rounded-md bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800">
+          Edit
         </span>
       ),
     },
@@ -171,6 +183,13 @@ export default function OpsDashboard({
             </Link>
 
             <Link
+              href="/ops/email-templates"
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+            >
+              Email templates
+            </Link>
+
+            <Link
               href="/ops/clearance-quotes"
               className={classNames(
                 "rounded-lg px-3 py-2 text-sm font-semibold",
@@ -237,10 +256,7 @@ export default function OpsDashboard({
             <div className="mt-1 flex items-center gap-2">
               <div className="text-2xl font-semibold text-gray-900">{billingIssueCount}</div>
               <span
-                className={classNames(
-                  "rounded-md px-2 py-1 text-xs font-semibold",
-                  badgeTone(billingIssueCount)
-                )}
+                className={classNames("rounded-md px-2 py-1 text-xs font-semibold", badgeTone(billingIssueCount))}
               >
                 {billingIssueCount === 0 ? "All good" : "Needs attention"}
               </span>
