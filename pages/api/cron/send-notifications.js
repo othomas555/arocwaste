@@ -55,7 +55,6 @@ function getCronAuthToken(req) {
  * Replace {{key}} placeholders with values from payload.
  * - Unknown keys become ""
  * - Values are stringified
- * - Simple + predictable (no logic, no loops)
  */
 function renderTemplate(str, payload) {
   const src = String(str || "");
@@ -214,7 +213,7 @@ export default async function handler(req, res) {
   const { data: rows, error } = await supabase
     .from("notification_queue")
     .select("id,event_type,target_type,target_id,recipient_email,payload,scheduled_at,status,cancelled_at,sent_at")
-    .eq("status", "pending")
+    .in("status", ["pending", "queued"])
     .is("cancelled_at", null)
     .is("sent_at", null)
     .lte("scheduled_at", nowIso)
@@ -230,7 +229,7 @@ export default async function handler(req, res) {
 
   for (const n of items) {
     // Safety: if it was cancelled between fetch + send, skip it.
-    if (n.status !== "pending" || n.cancelled_at || n.sent_at) {
+    if (!["pending", "queued"].includes(String(n.status || "")) || n.cancelled_at || n.sent_at) {
       skipped++;
       continue;
     }
